@@ -26,7 +26,7 @@
 
 仕様が暗に求めているが、素直に書いたテストでは踏まない入力。各行のテストは、担当タスクのテストコードに含めてある。
 
-1. **母線電圧が下限ちょうど**：`vdcmin == vdcmax/8` だと逆数がちょうど 8 になり Q3.28 に収まらない。`CurrentParam::new` はこれをエラーにし、`vdc == vdc_min` での `update_vdc` は範囲内の `vdc_inv` を返すこと（Task 4）。
+1. **母線電圧が `vdcmax/8` ちょうど、それ以下、0、負**：逆数が Q3.28 に収まらない。`update_vdc` はパニックも飽和もせず、更新をスキップして `false` を返すこと（Task 4）。
 2. **デッドタイムしきい値が丸めで 0 になる**：`i_threshold` が極端に小さいと pu 変換後に 0 になる。`soft_sign` は 0 除算せず ±1 を返すこと（Task 3）。
 3. **Config に NaN や無限大が入る**：パニックせず `ConfigError` を返すこと（Task 4）。
 4. **位置誤差が 8 回転を超える**：ゲインを掛ける前に飽和して速度指令が弱まらないこと（Task 3）。
@@ -1572,36 +1572,30 @@ git commit -m "Port controllers to fixed-point per-unit types"
 
 ### Task 4: Config を物理単位にし、Param::new で per-unit へ変換する
 
-設計書からの修正点が 1 つある。設計書は「`vdcmin < vdcmax/8` でエラー」としているが、`vdcmin == vdcmax/8` ちょうどでも逆数が 8 になり Q3.28（8 未満）に収まらない。そこで条件を「`vdcmin <= vdcmax/8` でエラー」とし、丸めの影響を避けるため per-unit 変換後の値で判定する。
-
-母線電圧の下限（per-unit）は専用の構造体を作らず、`CurrentParam` に `vdc_min` として持たせる。検証と変換は `CurrentParam::new` で行う。
+母線電圧の下限は設定値として持たない。逆数（per-unit で V_b / vdc）が Q3.28 に収まる条件は vdc > 1/8、つまり母線電圧が `vdcmax/8` より大きいことなので、これをそのまま下限として使う。`update_vdc` は `checked_div` で逆数を求め、収まらなければ更新しない。
 
 **Files:**
 - Modify: `md-core/src/controller.rs`
 
 **Interfaces:**
-- Consumes: Task 3 の `CurrentParam` / `VelocityParam` / `PositionParam` / `Measurement`、Task 1 の `Q3_28::checked_from_f32`、`Q16_16::checked_from_f32`、`Q3_28::unchecked_div`
+- Consumes: Task 3 の `CurrentParam` / `VelocityParam` / `PositionParam` / `Measurement`、Task 1 の `Q3_28::checked_from_f32`、`Q16_16::checked_from_f32`、`Q3_28::checked_div`
 - Produces（`md_core::controller`）:
   - `pub struct Config`（下記の全フィールドが `pub f32`）
-  - `pub enum ConfigError { NotPositive(&'static str), OutOfRange(&'static str), VdcMinTooLow }`（`Clone + Copy + PartialEq + Debug`。文字列は `Config` のフィールド名）
+  - `pub enum ConfigError { NotPositive(&'static str), OutOfRange(&'static str) }`（`Clone + Copy + PartialEq + Debug`。文字列は `Config` のフィールド名）
   - `CurrentParam::new(c: &Config) -> Result<CurrentParam, ConfigError>`
   - `VelocityParam::new(c: &Config) -> Result<VelocityParam, ConfigError>`
   - `PositionParam::new(c: &Config) -> Result<PositionParam, ConfigError>`
-  - `CurrentParam` に非公開フィールド `vdc_min: Q3_28` を追加
-  - `Measurement::update_vdc(&mut self, p: &CurrentParam, vdc: Q3_28) -> bool`（更新したら `true`、下限未満でスキップしたら `false`）
+  - `Measurement::update_vdc(&mut self, vdc: Q3_28) -> bool`（更新したら `true`、vdc が 1/8 pu 以下でスキップしたら `false`）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
-`md-core/src/controller.rs` のテストモジュール内の `bare_current_param` で、`imax: q(7.0),` の次の行に `vdc_min: q(0.5),` を追加する（`CurrentParam` に増えるフィールドのぶん）。
-
-続けて、`vparam` 関数の直後に追加:
+`md-core/src/controller.rs` のテストモジュール内、`vparam` 関数の直後に追加:
 
 ```rust
 	/// 物理単位の設定例。基準値は V_b=24V, I_b=10A, ω_b=300rad/s
 	fn config() -> Config {
 		Config {
 			vdcmax: 24.0,
-			vdcmin: 12.0,
 			ibase: 10.0,
 			wbase: 300.0,
 			ke: 0.02,
@@ -1637,7 +1631,6 @@ git commit -m "Port controllers to fixed-point per-unit types"
 		assert_close(p.duty_max, 0.95);
 		assert_close(p.vmax, 0.8333333);         // 20 / 24
 		assert_close(p.imax, 0.8);               // 8 / 10
-		assert_close(p.vdc_min, 0.5);            // 12 / 24
 	}
 
 	#[test]
@@ -1725,59 +1718,39 @@ git commit -m "Port controllers to fixed-point per-unit types"
 	// ---- 母線電圧 ----
 
 	#[test]
-	fn current_param_new_rejects_vdc_min_too_low() {
-		// vdc_inv = V_b / vdc が8未満に収まるには vdcmin > vdcmax/8 が必要
-		let mut c = config();
-		c.vdcmin = 3.0;  // ちょうど 24/8
-		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
-
-		let mut c = config();
-		c.vdcmin = 2.0;
-		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
-
-		let mut c = config();
-		c.vdcmin = 0.0;
-		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmin")));
-	}
-
-	#[test]
 	fn update_vdc_sets_voltage_and_inverse() {
-		let p = CurrentParam::new(&config()).unwrap();
 		let mut m = meas(0.0, 0.0, 0.0);
-		assert!(m.update_vdc(&p, q(0.75)));
+		assert!(m.update_vdc(q(0.75)));
 		assert_close(m.vdc, 0.75);
 		assert_close(m.vdc_inv, 1.3333334);
 	}
 
 	#[test]
-	fn update_vdc_skips_below_minimum() {
-		let p = CurrentParam::new(&config()).unwrap();
-		let mut m = meas(0.0, 0.0, 0.0);
-		// 下限0.5pu未満なら、前回の値(0.5, 2.0)を保つ
-		assert!(!m.update_vdc(&p, q(0.25)));
-		assert_close(m.vdc, 0.5);
-		assert_close(m.vdc_inv, 2.0);
+	fn update_vdc_skips_when_inverse_does_not_fit() {
+		// 逆数が8未満に収まるのは vdc > 1/8 (母線電圧がvdcmax/8より大きい)ときだけ。
+		// 収まらなければ前回の値(0.5, 2.0)を保つ
+		for vdc in [0.125, 0.0625, 0.0, -0.5] {
+			let mut m = meas(0.0, 0.0, 0.0);
+			assert!(!m.update_vdc(q(vdc)), "vdc: {vdc}");
+			assert_close(m.vdc, 0.5);
+			assert_close(m.vdc_inv, 2.0);
+		}
 	}
 
 	#[test]
-	fn update_vdc_at_lowest_allowed_minimum_stays_in_range() {
-		// 下限を許される限界近くまで下げても、逆数が範囲内に収まる
-		let mut c = config();
-		c.vdcmin = 3.1;  // 24/8 = 3.0 をわずかに上回る
-		let p = CurrentParam::new(&c).unwrap();
+	fn update_vdc_just_above_one_eighth_stays_in_range() {
 		let mut m = meas(0.0, 0.0, 0.0);
-		let vdc_min = p.vdc_min;
-		assert!(m.update_vdc(&p, vdc_min));
+		assert!(m.update_vdc(q(0.13)));
 		assert!(m.vdc_inv < Q3_28::MAX);
 		// 8に近い値なので、丸めの分だけ許容誤差を広げる
-		assert!((m.vdc_inv.to_f32() - 24.0 / 3.1).abs() < 1e-4);
+		assert!((m.vdc_inv.to_f32() - 1.0 / 0.13).abs() < 1e-4);
 	}
 ```
 
 - [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test -p md-core`
-Expected: コンパイルエラー（`no function or associated item named `new` found for struct `CurrentParam``、`struct `CurrentParam` has no field named `vdc_min``、`Config` のフィールド不一致など）
+Expected: コンパイルエラー（`no function or associated item named `new` found for struct `CurrentParam``、`no method named `update_vdc` found for struct `Measurement``、`Config` のフィールド不一致など）
 
 - [ ] **Step 3: Config を物理単位の f32 に置き換える**
 
@@ -1788,8 +1761,7 @@ Expected: コンパイルエラー（`no function or associated item named `new`
 ```rust
 /// 設定値。物理単位で持ち、各Param::newでper-unitに変換する
 pub struct Config {
-	pub vdcmax: f32,  // [V] Vdcの最大値。電圧の基準値を兼ねる
-	pub vdcmin: f32,  // [V] これ未満では母線電圧を更新しない。vdcmax/8より大きいこと
+	pub vdcmax: f32,  // [V] Vdcの最大値。電圧の基準値を兼ねる。母線電圧がこの1/8以下のときは測定値を更新しない
 	pub ibase: f32,  // [A] 電流の基準値(測定フルスケール)
 	pub wbase: f32,  // [rad/s] 速度の基準値(最高速度程度)
 	pub ke: f32,  // [V/(rad/s)] 逆起電力
@@ -1820,8 +1792,6 @@ pub enum ConfigError {
 	NotPositive(&'static str),
 	/// per-unit変換後の値が型の範囲に収まらない、またはNaN
 	OutOfRange(&'static str),
-	/// vdcminがvdcmax/8以下で、母線電圧の逆数が範囲に収まらない
-	VdcMinTooLow,
 }
 
 /// 正の有限値ならそのまま返す
@@ -1840,23 +1810,22 @@ fn to_q(name: &'static str, v: f32) -> Result<Q3_28, ConfigError> {
 
 ```rust
 impl Measurement {
-	/// 母線電圧を更新する。下限未満なら何も更新せずfalseを返す
-	pub fn update_vdc(&mut self, p: &CurrentParam, vdc: Q3_28) -> bool {
-		if vdc < p.vdc_min {
+	/// 母線電圧を更新する。逆数がQ3.28に収まらない(vdcが1/8以下 = 母線電圧がvdcmax/8以下)
+	/// ときは何も更新せずfalseを返す
+	pub fn update_vdc(&mut self, vdc: Q3_28) -> bool {
+		if vdc <= Q3_28::ZERO {
 			return false;
 		}
-		self.vdc = vdc;
-		// vdc >= vdc_min > 1/8 なので逆数は8未満に収まる
-		self.vdc_inv = Q3_28::ONE.unchecked_div(vdc);
-		true
+		match Q3_28::ONE.checked_div(vdc) {
+			Some(vdc_inv) => {
+				self.vdc = vdc;
+				self.vdc_inv = vdc_inv;
+				true
+			},
+			None => false,
+		}
 	}
 }
-```
-
-`CurrentParam` 構造体の `imax: Q3_28,` の次の行にフィールドを追加:
-
-```rust
-	vdc_min: Q3_28,  // これ未満では母線電圧を更新しない。1/8より大きい
 ```
 
 - [ ] **Step 5: 各 Param::new を実装する**
@@ -1867,12 +1836,6 @@ impl Measurement {
 impl CurrentParam {
 	pub fn new(c: &Config) -> Result<CurrentParam, ConfigError> {
 		let vb = positive("vdcmax", c.vdcmax)?;
-		let vmin = positive("vdcmin", c.vdcmin)?;
-		let vdc_min = to_q("vdcmin", vmin / vb)?;
-		// 変換後の値で判定する。1/8ちょうどだと逆数が8になり範囲を外れる
-		if vdc_min <= to_q("vdcmin", 0.125)? {
-			return Err(ConfigError::VdcMinTooLow);
-		}
 		let ib = positive("ibase", c.ibase)?;
 		let ob = positive("wbase", c.wbase)?;
 		let t = positive("cperiod", c.cperiod)?;
@@ -1889,7 +1852,6 @@ impl CurrentParam {
 			duty_max: to_q("duty_max", c.duty_max)?,
 			vmax: to_q("vmax", c.vmax / vb)?,
 			imax: to_q("imax", c.imax / ib)?,
-			vdc_min,
 		})
 	}
 }
@@ -2020,7 +1982,7 @@ feature `f32` を有効にすると、同じ API のまま中身が浮動小数�
 
 - 加減乗算と符号反転、`abs` はあふれたら型の上限・下限に飽和する。ラップして符号が反転することはない。これは安全策であり、通常動作で飽和に達しないよう基準値とゲインを選ぶ。
 - 除算は `checked_div`（範囲外・0 除算で `None`）と `unchecked_div`（範囲内であることを呼び出し側が保証。debug ビルドでは違反を検出）だけ。逆数や除算は割る数が小さいだけで範囲を外れるので、値の範囲を知っている側が使い分ける。
-  - 母線電圧の逆数：`vdcmin > vdcmax/8` を `CurrentParam::new` で検証し、下限未満の測定値では更新しないので、逆数は必ず範囲内に収まる。
+  - 母線電圧の逆数：測定値は範囲を保証できないので `checked_div` を使う。逆数が収まらない（母線電圧が `vdcmax/8` 以下の）ときは測定値を更新せず、前回の値を使い続ける。
   - デッドタイム補償：|i| がしきい値未満のときだけ `i / しきい値` を計算するので、結果は (-1, 1) に収まる。
 - 型をまたぐ変換は明示的な関数（`to_q3_28` など）だけで、暗黙の変換はない。
 ```

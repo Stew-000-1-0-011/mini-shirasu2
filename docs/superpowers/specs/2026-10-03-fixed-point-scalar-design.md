@@ -69,8 +69,7 @@ f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小�
 
 | フィールド | 単位 | 備考 |
 |---|---|---|
-| `vdcmax` | V | V_b を兼ねる |
-| `vdcmin` | V | 新規。これ未満では母線電圧を更新しない |
+| `vdcmax` | V | V_b を兼ねる。母線電圧がこの 1/8 以下のときは測定値を更新しない |
 | `ibase` | A | 新規 |
 | `wbase` | rad/s | 新規 |
 | `ke` | V/(rad/s) | |
@@ -113,12 +112,10 @@ f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小�
 | VelocityParam.wmax | wmax/ω_b | Q3_28 |
 | PositionParam.kp | pkp·2π/ω_b | Q3_28 |
 | PositionParam.pmax | pmax | Q16_16 |
-| CurrentParam.vdc_min | vdcmin/V_b（母線電圧の更新で使う） | Q3_28 |
 
 `ConfigError` を返す条件（どのフィールドかを示す）:
 
 - 変換後の値が型の範囲に収まらない
-- `vdcmin <= vdcmax/8`（vdc_inv が Q3.28 に収まらない。ちょうど 1/8 でも逆数が 8 になり範囲外）
 - `i_threshold <= 0`、`ckp <= 0`、各周期 `<= 0`、基準値 `<= 0`
 
 Param の型は pub、フィールドは非公開のまま（RTICX の shared に置く想定）。
@@ -134,7 +131,7 @@ Param の型は pub、フィールドは非公開のまま（RTICX の shared �
 | `th` | Q16_16 |
 
 - ADC 生値 → pu の変換はボード依存（シャント抵抗、アンプゲイン）なので firm 側で行う。
-- 母線電圧の更新は md-core の関数で行う: `vdc < vdc_min` なら `vdc` と `vdc_inv` を更新しない。それ以外は `vdc_inv = ONE.unchecked_div(vdc)`（下限が保証されているため範囲内）。
+- 母線電圧の更新は md-core の関数で行う: `vdc_inv = ONE.checked_div(vdc)` が収まらない（vdc が 1/8 pu 以下、つまり母線電圧が `vdcmax/8` 以下の）ときは `vdc` と `vdc_inv` を更新しない。下限を別の設定値としては持たない。
 
 ### 目標値
 
