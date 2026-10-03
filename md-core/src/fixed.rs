@@ -157,6 +157,18 @@ mod tests {
 	}
 
 	#[test]
+	fn widening_mul_at_exact_boundary() {
+		// 2 * 4 = 8 は Q3.60 に入らない(MAXは8未満)。-2 * 4 = -8 はちょうど入る
+		assert_eq!(q(2.0).widening_mul(q(4.0)), Q3_60::MAX);
+		assert_eq!(q(-2.0).widening_mul(q(4.0)), Q3_60::MIN);
+	}
+
+	#[test]
+	fn q3_28_checked_div_by_negative_divisor() {
+		assert_close(q(3.0).checked_div(q(-4.0)).unwrap().to_f32(), -0.75);
+	}
+
+	#[test]
 	fn q3_28_converts_to_other_formats() {
 		assert_close(q(1.25).to_q3_60().to_f32(), 1.25);
 		assert_close(q(-1.5).to_q16_16().to_f32(), -1.5);
@@ -169,6 +181,7 @@ mod tests {
 		assert_close(q60(1.25).to_f32(), 1.25);
 		assert_close(Q3_60::ZERO.to_f32(), 0.0);
 		assert!(Q3_60::checked_from_f32(8.0).is_none());
+		assert_eq!(Q3_60::checked_from_f32(-8.0), Some(Q3_60::MIN));
 		assert!(Q3_60::checked_from_f32(f32::NAN).is_none());
 	}
 

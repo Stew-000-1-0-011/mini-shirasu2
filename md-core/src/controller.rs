@@ -149,13 +149,22 @@ impl CurrentParam {
 			return Err(ConfigError::OutOfRange("duty_max"));
 		}
 
+		// 飽和中の積分は i_sum' = (1-kb)*i_sum + kb*(v2-ff) となり、kb > 2 で発散して±duty_maxで振動する。
+		// kb = 1 なら飽和した周期のうちに積分値を戻せるので、1を上限にする
+		let kb = (cki * t / ckp).min(1.0);
+		let i_threshold = to_q("i_threshold", ith / ib)?;
+		// pu変換の丸めで0になると、電流0でもデッドタイム補償が掛かってしまう
+		if i_threshold == Q3_28::ZERO {
+			return Err(ConfigError::NotPositive("i_threshold"));
+		}
+
 		Ok(CurrentParam {
 			kp: to_q("ckp", ckp * ib / vb)?,
 			ki: to_q("cki", cki * t * ib / vb)?,
-			kb: to_q("cki", cki * t / ckp)?,
+			kb: to_q("kb", kb)?,
 			ke: to_q("ke", c.ke * ob / vb)?,
 			dead_duty: to_q("dead_duty", dead_duty)?,
-			i_threshold: to_q("i_threshold", ith / ib)?,
+			i_threshold,
 			duty_max: to_q("duty_max", duty_max)?,
 			vmax: to_q("vmax", vmax / vb)?,
 			imax: to_q("imax", imax / ib)?,
@@ -553,6 +562,68 @@ mod tests {
 		let mut c = config();
 		c.wb = -0.5;
 		assert!(VelocityParam::new(&c).is_ok());
+	}
+
+	#[test]
+	fn current_param_new_clamps_kb_to_one() {
+		// kb = 50000 * 5e-5 / 0.5 = 5 だが、kb > 2 では飽和中の積分が発散するので1に抑える
+		let mut c = config();
+		c.ckp = 0.5;
+		c.cki = 50000.0;
+		let p = CurrentParam::new(&c).unwrap();
+		assert_close(p.kb, 1.0);
+	}
+
+	#[test]
+	#[cfg(not(feature = "f32"))]  // 浮動小数点版には分解能がなく、1e-13も0にならない
+	fn current_param_new_rejects_i_threshold_that_quantizes_to_zero() {
+		// 1e-12 / 10 はQ3.28の分解能(約3.7e-9)より小さく、変換すると0になる
+		let mut c = config();
+		c.i_threshold = 1e-12;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("i_threshold")));
+	}
+
+	#[test]
+	fn current_param_new_rejects_infinite_vdcmax() {
+		let mut c = config();
+		c.vdcmax = f32::INFINITY;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmax")));
+	}
+
+	#[test]
+	fn current_loop_recovers_from_saturation_with_low_inductance_tuning() {
+		// 低インダクタンスのモーター想定(R=5Ω, L=50µH, T=50µs)でkb = T*R/L = 5 になるチューニング
+		let mut c = config();
+		c.vdcmax = 24.0;
+		c.ibase = 10.0;
+		c.cperiod = 5e-5;
+		c.ckp = 0.5;
+		c.cki = 50000.0;
+		c.dead_duty = 0.0;
+		c.ke = 0.0;
+		let p = CurrentParam::new(&c).unwrap();
+		let mut st = CurrentState::new();
+
+		// 純抵抗R=5Ω、母線0.5pu(12V)固定。次周期の電流[pu] = duty * 0.5 * 24 / (5 * 10)
+		let mut i = 0.0f32;
+		let mut last = [(0.0f32, Saturated::Overflow); 20];
+		for n in 0..203 {
+			// 最初の3周期は飽和する大きな目標、その後は小さな目標
+			let target = if n < 3 { 0.8 } else { 0.05 };
+			let (duty, sat) = st.update(&p, q(target), &meas(i, 0.0, 0.0));
+			let duty = duty.to_f32();
+			i = duty * 0.24;
+			if n >= 183 {
+				last[n - 183] = (duty, sat);
+			}
+		}
+
+		assert!(last.iter().all(|&(_, s)| s == Saturated::NotSaturated), "{last:?}");
+		let max = last.iter().map(|&(d, _)| d).fold(f32::MIN, f32::max);
+		let min = last.iter().map(|&(d, _)| d).fold(f32::MAX, f32::min);
+		assert!(max - min < 1e-3, "min: {min}, max: {max}");
+		// 定常状態は 0.05 / 0.24
+		assert!((max - 0.05 / 0.24).abs() < 1e-2, "max: {max}");
 	}
 
 	// ---- 母線電圧 ----
