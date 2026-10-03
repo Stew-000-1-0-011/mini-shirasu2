@@ -43,7 +43,7 @@ feature `f32` で `Q3_60` と `Q16_16` を f64 にするのは、f32 の仮数�
 | フォーマット変換 | `Q3_60 → Q3_28`、`Q3_28 → Q3_60`、`Q16_16 ⇄ Q3_28` | 狭める方向は飽和 |
 | `checked_div(self, rhs) -> Option<Self>` | `Q3_28` | 範囲外・0除算で `None` |
 | `unchecked_div(self, rhs) -> Self` | `Q3_28` | 呼び出し側が範囲を保証。debug ビルドでは `debug_assert!` で0除算・範囲外を検出。release では検査せず結果は不定（未定義動作ではない） |
-| 定数 | `ZERO` `ONE` `MAX` `MIN` | |
+| 定数 | `ZERO` `MAX` `MIN`（全型）、`ONE`（`Q3_28` と `Q16_16` のみ。`Q3_60` にはない） | |
 | `f32` との変換 | `checked_from_f32(f32) -> Option<Self>` / `to_f32`（設定時・テスト用） | 範囲外・NaN で `None` |
 
 f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小数点版と同じ範囲（`Q3_28` なら ±8）で範囲外を判定する。これにより両版で同じ入力が同じ成否になる。
@@ -99,7 +99,7 @@ f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小�
 |---|---|---|
 | CurrentParam.kp | ckp·I_b/V_b | Q3_28 |
 | CurrentParam.ki | cki·cperiod·I_b/V_b | Q3_28 |
-| CurrentParam.kb | cki·cperiod/ckp | Q3_28 |
+| CurrentParam.kb | min(cki·cperiod/ckp, 1) | Q3_28 |
 | CurrentParam.ke | ke·ω_b/V_b | Q3_28 |
 | CurrentParam.dead_duty | dead_duty | Q3_28 |
 | CurrentParam.i_threshold | i_threshold/I_b | Q3_28 |
@@ -113,10 +113,17 @@ f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小�
 | PositionParam.kp | pkp·2π/ω_b | Q3_28 |
 | PositionParam.pmax | pmax | Q16_16 |
 
+`kb` を 1 で頭打ちにするのは、飽和中の積分が `i_sum' = (1-kb)·i_sum + kb·(v2-ff)` で更新され、kb > 2 では収束せず発散して ±duty_max で振動するため。kb = 1 は飽和した周期のうちに積分値を戻すデッドビートのリセットで、常に安定。
+
 `ConfigError` を返す条件（どのフィールドかを示す）:
 
-- 変換後の値が型の範囲に収まらない
-- `i_threshold <= 0`、`ckp <= 0`、各周期 `<= 0`、基準値 `<= 0`
+- 変換後の値が型の範囲に収まらない、または NaN（`OutOfRange`）
+- `i_threshold <= 0`、`ckp <= 0`、各周期 `<= 0`、基準値 `<= 0`、およびこれらが NaN・無限大（`NotPositive`）
+- 上限値（`imax`、`vmax`、`wmax`、`pmax`、`duty_max`、`dead_duty`）とゲイン（`cki`、`wkp`、`wki`、`pkp`）が負（`Negative`）
+- `duty_max > 1`（`OutOfRange`）
+- `i_threshold` が正でも、`I_b` で割って変換した結果が 0 になる（`NotPositive`）。0 のままだと電流 0 でもデッドタイム補償が掛かるため
+
+`ke` と `wb` は符号の制限をしない。
 
 Param の型は pub、フィールドは非公開のまま（RTICX の shared に置く想定）。
 
@@ -184,7 +191,7 @@ Q 型演算自体の飽和は Saturated に含めない。
 
 ## 5. ファイル構成
 
-- `md-core/src/fixed.rs`: `Q3_28`、`Q3_60`、`Q16_16` と演算。現行の `scalar.rs` は置き換えて削除。
+- `md-core/src/fixed.rs`: `Q3_28`、`Q3_60`、`Q16_16` と演算。現行の `scalar.rs` は置き換えて削除。バックエンドは `md-core/src/fixed/int.rs`（既定の固定小数点）と `md-core/src/fixed/float.rs`（feature `f32`）に置く。
 - `md-core/src/controller.rs`: Config / Param / Measurement / 各制御器 / Integrator / soft_sign。
 - `docs/数値表現.md`（新規）: per-unit 基準値と各型の使い分けの説明。**`docs/制御.md` は編集しない。**
 
@@ -193,7 +200,7 @@ Q 型演算自体の飽和は Saturated に含めない。
 - Q 型: 各演算の通常値と飽和境界、`checked_div` の `None`、`unchecked_div` の `debug_assert`（`#[should_panic]`、debug ビルド時）、拡大乗算の無丸め、フォーマット変換。
 - controller: 現行 52 件のテストの意図を引き継ぎ、値を pu に置き換える。入力は補助関数で作り、許容誤差付き比較にして固定小数点版と f32 版の両方で同じテストが通るようにする。
 - Param::new: 変換式の検証、`ConfigError` の各ケース。
-- 実行: `cargo test`、`cargo test --features f32`、`minisirasu-firm` の thumbv7m ビルド。
+- 実行: `cargo test -p md-core`、`cargo test -p md-core --features f32`、`cargo build -p md-core --target thumbv7m-none-eabi`（`--features f32` あり・なしの両方）。
 
 ## 範囲外（今回やらないこと）
 
