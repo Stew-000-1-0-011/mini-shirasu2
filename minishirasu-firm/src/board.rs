@@ -5,9 +5,11 @@ use stm32f1::stm32f103 as pac;
 
 const SYSCLK_HZ: u32 = 72_000_000;
 
-/// trueなら、RCRをカウンタの起動前に書く。更新イベント(CCRの反映)が山(CNT=ARR)で出る。
-/// 起動時の確認で「update event is not at the peak」と出たらfalseにして試す
-const RCR_BEFORE_START: bool = true;
+/// trueなら、RCRをカウンタの起動前に書く。
+/// 実機ではfalse(起動後に書く)で更新イベント(CCRの反映)が山(CNT=ARR)で出る。
+/// trueだと、UGでリピティションカウンタに1がロードされ、更新イベントは谷で出る。
+/// 起動時の確認で「update event is not at the peak」と出たら反対にして試す
+const RCR_BEFORE_START: bool = false;
 
 /// ADCトリガ用のチャネル4のコンペア値。OC4REFは CNT < CCR4 の間Highなので、
 /// ダウンカウントで谷の手前 (CCR4 - 1) カウントの時点で立ち上がる。
@@ -84,6 +86,9 @@ fn gpio_init(p: &pac::Peripherals) {
         w.iopaen().set_bit().iopben().set_bit().tim1en().set_bit().afioen().set_bit().adc1en().set_bit()
     });
     p.RCC.apb1enr.modify(|_, w| w.tim2en().set_bit().canen().set_bit());
+    // DMAは使わないが、クロックを入れておく。F1ではAHBのマスタが動いていないと、
+    // idleのwfi中にデバッガからメモリを読めず、RTTのログが届かない
+    p.RCC.ahbenr.modify(|_, w| w.dma1en().set_bit());
 
     // 出力は先にLowにしておく、NFAULTはプルアップ
     p.GPIOA.bsrr.write(|w| w.br2().set_bit().br4().set_bit().bs3().set_bit());

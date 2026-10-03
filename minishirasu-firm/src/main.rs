@@ -66,6 +66,8 @@ mod app {
         if !phase_ok {
             defmt::error!("update event is not at the peak: flip RCR_BEFORE_START in board.rs");
         }
+        // バスと同期するまで戻らないので、ここで止まったことがログでわかるようにする
+        defmt::info!("waiting for CAN bus");
         let (tx, rx) = can::init();
         defmt::info!("minishirasu-firm started");
 
