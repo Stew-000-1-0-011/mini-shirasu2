@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "md-core",
-    "minisirasu-firm",
+    "minishirasu-firm",
 ]
 resolver = "3"
 

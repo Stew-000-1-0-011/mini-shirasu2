@@ -2,6 +2,11 @@
 
 use core::ops::{Add, Mul, Neg, Sub};
 
+/// 最も近い整数に丸める。0.5は0から遠い側。範囲外は飽和
+fn round_to_i32(x: f64) -> i32 {
+	(if x >= 0.0 { x + 0.5 } else { x - 0.5 }) as i32
+}
+
 /// per-unitの信号とゲイン。固定小数点版のQ3.28に相当
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 pub struct Q3_28(f32);
@@ -73,6 +78,16 @@ impl Q3_28 {
 
 	pub fn to_q16_16(self) -> Q16_16 {
 		Q16_16(self.0 as f64)
+	}
+
+	/// per-unit値に整数を掛け、最も近い整数に丸める。あふれは飽和
+	pub fn scale_int(self, n: i32) -> i32 {
+		round_to_i32(self.0 as f64 * n as f64)
+	}
+
+	/// ゲインに整数を掛ける。あふれは飽和
+	pub fn mul_int(self, n: i32) -> Self {
+		Self::sat(self.0 * n as f32)
 	}
 }
 
@@ -210,6 +225,21 @@ impl Q16_16 {
 
 	pub fn to_q3_28(self) -> Q3_28 {
 		Q3_28::sat(self.0 as f32)
+	}
+
+	/// 位置に整数を掛け、最も近い整数に丸める。あふれは飽和
+	pub fn scale_int(self, n: i32) -> i32 {
+		round_to_i32(self.0 * n as f64)
+	}
+
+	/// num / den。あふれは飽和。denが0でないことは呼び出し側が保証する。
+	/// debugビルドでは違反を検出する。releaseでは0を返す
+	pub fn from_ratio(num: i32, den: u32) -> Self {
+		debug_assert!(den != 0, "from_ratio: den is zero");
+		if den == 0 {
+			return Self::ZERO;
+		}
+		Self::sat(num as f64 / den as f64)
 	}
 }
 
