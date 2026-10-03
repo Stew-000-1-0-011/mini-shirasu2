@@ -56,10 +56,10 @@ pub const PLAN: Plan = Plan {
         (id::ENCODER_REVERSED, 1.0),
     ],
     // 書き込んだだけで回り出さないよう、コミットするときは0にしておく。試すときに1〜3にする
+    // 書き込んだだけで回り出さないよう、コミットするときは0にしておく。試すときに1〜3にする
     mode: 0,
-    // 駆動軸で+1回転(回転単位のQ16.16)
-    target: Message::TargetPosition { position: 65536, velocity_ff: 0.0, accel_ff: 0.0 },
-    run_ms: 5000,
+    target: Message::TargetCurrent { current: 5.0 },
+    run_ms: 2000,
 };
 
 /// Benchタスクを起こす周期[ms]。1回につきコマンドを1つ進める
