@@ -27,6 +27,12 @@ fn scale_f32(v: f32, frac: u32) -> Option<i64> {
 	Some(r as i64)
 }
 
+/// 2^frac を1.0とする値を、最も近い整数に丸める。0.5は0から遠い側
+const fn round_shift(p: i64, frac: u32) -> i64 {
+	let half = 1i64 << (frac - 1);
+	if p >= 0 { (p + half) >> frac } else { -((-p + half) >> frac) }
+}
+
 /// per-unitの信号とゲイン。Q3.28
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 pub struct Q3_28(i32);
@@ -97,6 +103,16 @@ impl Q3_28 {
 
 	pub fn to_q16_16(self) -> Q16_16 {
 		Q16_16(self.0 >> 12)
+	}
+
+	/// per-unit値に整数を掛け、最も近い整数に丸める。あふれは飽和
+	pub fn scale_int(self, n: i32) -> i32 {
+		sat_i32(round_shift(self.0 as i64 * n as i64, Self::FRAC))
+	}
+
+	/// ゲインに整数を掛ける。あふれは飽和
+	pub fn mul_int(self, n: i32) -> Self {
+		Q3_28(sat_i32(self.0 as i64 * n as i64))
 	}
 }
 
@@ -229,6 +245,21 @@ impl Q16_16 {
 
 	pub fn to_q3_28(self) -> Q3_28 {
 		Q3_28(sat_i32((self.0 as i64) << 12))
+	}
+
+	/// 位置に整数を掛け、最も近い整数に丸める。あふれは飽和
+	pub fn scale_int(self, n: i32) -> i32 {
+		sat_i32(round_shift(self.0 as i64 * n as i64, Self::FRAC))
+	}
+
+	/// num / den。あふれは飽和。denが0でないことは呼び出し側が保証する。
+	/// debugビルドでは違反を検出する。releaseでは0を返す
+	pub fn from_ratio(num: i32, den: u32) -> Self {
+		debug_assert!(den != 0, "from_ratio: den is zero");
+		if den == 0 {
+			return Self::ZERO;
+		}
+		Q16_16(sat_i32(((num as i64) << Self::FRAC) / den as i64))
 	}
 }
 

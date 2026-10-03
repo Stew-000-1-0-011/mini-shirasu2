@@ -270,4 +270,84 @@ mod tests {
 		assert_eq!(q16(100.0).to_q3_28(), Q3_28::MAX);
 		assert_eq!(q16(-100.0).to_q3_28(), Q3_28::MIN);
 	}
+
+	// ---- 整数との境界 ----
+
+	#[test]
+	fn q3_28_scale_int_rounds_to_nearest() {
+		assert_eq!(q(0.5).scale_int(1800), 900);
+		assert_eq!(q(-0.25).scale_int(1800), -450);
+		assert_eq!(Q3_28::ZERO.scale_int(1800), 0);
+		assert_eq!(Q3_28::ONE.scale_int(1800), 1800);
+		// 0.3は2進で表せないが、丸めれば3になる
+		assert_eq!(q(0.3).scale_int(10), 3);
+		assert_eq!(q(-0.3).scale_int(10), -3);
+		// 2.6 -> 3、-2.6 -> -3
+		assert_eq!(q(0.26).scale_int(10), 3);
+		assert_eq!(q(-0.26).scale_int(10), -3);
+	}
+
+	#[test]
+	fn q3_28_scale_int_saturates() {
+		assert_eq!(q(4.0).scale_int(i32::MAX), i32::MAX);
+		assert_eq!(q(-4.0).scale_int(i32::MAX), i32::MIN);
+	}
+
+	#[test]
+	fn q3_28_mul_int() {
+		assert_close(q(0.125).mul_int(3).to_f32(), 0.375);
+		assert_close(q(0.001).mul_int(100).to_f32(), 0.1);
+		assert_close(q(0.001).mul_int(-100).to_f32(), -0.1);
+		assert_eq!(q(0.5).mul_int(0), Q3_28::ZERO);
+	}
+
+	#[test]
+	fn q3_28_mul_int_saturates() {
+		assert_eq!(Q3_28::ONE.mul_int(100), Q3_28::MAX);
+		assert_eq!(Q3_28::ONE.mul_int(-100), Q3_28::MIN);
+	}
+
+	#[test]
+	fn q16_16_scale_int_rounds_to_nearest() {
+		// 65536倍するとQ16.16の生の値になる
+		assert_eq!(q16(1.5).scale_int(65536), 98304);
+		assert_eq!(q16(-0.25).scale_int(65536), -16384);
+		// 7.5 -> 8、-7.5 -> -8
+		assert_eq!(q16(2.5).scale_int(3), 8);
+		assert_eq!(q16(-2.5).scale_int(3), -8);
+	}
+
+	#[test]
+	fn q16_16_scale_int_saturates() {
+		assert_eq!(q16(30000.0).scale_int(i32::MAX), i32::MAX);
+		assert_eq!(q16(-30000.0).scale_int(i32::MAX), i32::MIN);
+	}
+
+	#[test]
+	fn q16_16_from_ratio() {
+		assert_close(Q16_16::from_ratio(1, 4).to_f32(), 0.25);
+		assert_close(Q16_16::from_ratio(26624, 8192).to_f32(), 3.25);
+		assert_close(Q16_16::from_ratio(-2048, 8192).to_f32(), -0.25);
+		assert_eq!(Q16_16::from_ratio(0, 8192), Q16_16::ZERO);
+	}
+
+	#[test]
+	fn q16_16_from_ratio_saturates() {
+		assert_eq!(Q16_16::from_ratio(i32::MAX, 1), Q16_16::MAX);
+		assert_eq!(Q16_16::from_ratio(i32::MIN, 1), Q16_16::MIN);
+	}
+
+	#[test]
+	fn q16_16_from_ratio_roundtrips_raw_value() {
+		// 通信ではQ16.16の生の値をやり取りする
+		assert_eq!(Q16_16::from_ratio(98304, 65536).scale_int(65536), 98304);
+		assert_eq!(Q16_16::from_ratio(-12345, 65536).scale_int(65536), -12345);
+	}
+
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic]
+	fn q16_16_from_ratio_zero_denominator_panics_in_debug() {
+		let _ = Q16_16::from_ratio(1, 0);
+	}
 }
