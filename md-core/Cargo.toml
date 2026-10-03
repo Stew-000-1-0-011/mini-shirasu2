@@ -1,3 +1,7 @@
 [package]
 name = "md-core"
 edition = "2024"
+
+[features]
+# 数値型の中身を浮動小数点にする(既定は固定小数点)
+f32 = []
