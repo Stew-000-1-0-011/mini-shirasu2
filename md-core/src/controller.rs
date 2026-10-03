@@ -180,7 +180,7 @@ impl CurrentState {
 		CurrentState { i_sum: Integrator::new() }
 	}
 
-	/// 電流 -> デューティ比。PI -> 逆起電力補償 -> 電圧制限 + デューティ上限 -> デューティ換算 + デッドタイム補償
+	/// 電流 -> デューティ比。PI -> 逆起電力補償 -> デッドタイム補償 -> 電圧制限 + デューティ上限 -> デューティ換算
 	pub fn update(&mut self, p: &CurrentParam, u: Q3_28, m: &Measurement) -> (Q3_28, Saturated) {
 		// 目標電流を制限する
 		let u_clamped = u.min(p.imax).max(-p.imax);
@@ -190,22 +190,22 @@ impl CurrentState {
 		let v_pi = p.kp * e + self.i_sum.value();
 		// 逆起電力補償
 		let v1 = v_pi + p.ke * m.w;
+		// デッドタイム補償(デューティー比の誤差)を電圧に直して足す
+		let v2 = v1 + p.dead_duty * soft_sign(m.i, p.i_threshold) * m.vdc;
+
 		// 最大電圧制限 & デューティ上限
 		let vlim = p.vmax.min(p.duty_max * m.vdc);
-		let v2 = v1.min(vlim).max(-vlim);
+		let v3 = v2.min(vlim).max(-vlim);
 
-		// アンチワインドアップを入れた積算
+		// アンチワインドアップを入れた積算。戻すのは制限で削られた分だけ
 		self.i_sum.add_product(p.ki, e);
-		self.i_sum.add_product(p.kb, v2 - v1);
+		self.i_sum.add_product(p.kb, v3 - v2);
 
-		// デューティ換算してデッドタイム補償(のデューティー比)を足す
-		let duty1 = v2 * m.vdc_inv + p.dead_duty * soft_sign(m.i, p.i_threshold);
+		let duty2 = (v3 * m.vdc_inv).min(Q3_28::ONE).max(-Q3_28::ONE);
 
-		let duty2 = duty1.min(Q3_28::ONE).max(-Q3_28::ONE);
-
-		let saturate = if u > p.imax || v1 > v2 {
+		let saturate = if u > p.imax || v2 > v3 {
 			Saturated::Overflow
-		} else if u < -p.imax || v1 < v2 {
+		} else if u < -p.imax || v2 < v3 {
 			Saturated::Underflow
 		} else {
 			Saturated::NotSaturated
@@ -773,12 +773,12 @@ mod tests {
 	}
 
 	#[test]
-	fn current_update_adds_dead_time_duty_after_conversion() {
+	fn current_update_adds_dead_time_compensation_as_voltage() {
 		let mut p = bare_current_param(0.5, 0.0, 0.0, 7.0);
 		p.dead_duty = q(0.0625);
 		p.i_threshold = q(0.125);
 		let mut st = CurrentState::new();
-		// duty = 0.5 + 0.0625*soft_sign(0.25) = 0.5625
+		// v = 0.25 + 0.0625*soft_sign(0.25)*0.5 = 0.28125 -> duty = 0.5625
 		assert_close(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).0, 0.5625);
 	}
 
@@ -794,17 +794,51 @@ mod tests {
 	}
 
 	#[test]
-	fn current_duty_is_clamped_to_plus_minus_one() {
+	fn current_duty_with_dead_time_never_exceeds_duty_max() {
 		let mut p = bare_current_param(2.0, 0.0, 0.0, 7.0);
+		p.duty_max = q(0.75);
 		p.dead_duty = q(0.0625);
 		p.i_threshold = q(0.125);
 		let mut st = CurrentState::new();
-		// v = 2*0.5 = 1.0 -> 母線0.5puで頭打ち -> duty 1.0 + 0.0625 -> 1.0
-		assert_close(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).0, 1.0);
+		// v = 2*0.5 = 1.0 に補償を足しても、0.75*0.5 = 0.375 で頭打ち -> duty 0.75
+		assert_close(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).0, 0.75);
 
 		let mut st = CurrentState::new();
-		// 逆向きも同様に -1.0 - 0.0625 -> -1.0
-		assert_close(st.update(&p, q(-0.75), &meas(-0.25, 0.0, 0.0)).0, -1.0);
+		assert_close(st.update(&p, q(-0.75), &meas(-0.25, 0.0, 0.0)).0, -0.75);
+	}
+
+	#[test]
+	fn current_dead_time_compensation_alone_is_not_saturation() {
+		let mut p = bare_current_param(0.5, 0.0, 0.0, 7.0);
+		p.dead_duty = q(0.0625);
+		p.i_threshold = q(0.125);
+		let mut st = CurrentState::new();
+		// 補償を足しても制限に届かなければ飽和ではない(電流の向きによらず)
+		assert_eq!(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).1, Saturated::NotSaturated);
+		assert_eq!(st.update(&p, q(-0.75), &meas(-0.25, 0.0, 0.0)).1, Saturated::NotSaturated);
+	}
+
+	#[test]
+	fn current_reports_saturation_when_dead_time_compensation_hits_limit() {
+		// PIの出力0.25は制限0.26の内側だが、補償0.03125を足すと超える
+		let mut p = bare_current_param(0.5, 0.0, 0.0, 0.26);
+		p.dead_duty = q(0.0625);
+		p.i_threshold = q(0.125);
+		let mut st = CurrentState::new();
+		let (duty, saturated) = st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0));
+		assert_close(duty, 0.52);
+		assert_eq!(saturated, Saturated::Overflow);
+	}
+
+	#[test]
+	fn current_dead_time_compensation_does_not_leak_into_integral() {
+		let mut p = bare_current_param(0.0, 0.0, 0.5, 7.0);
+		p.dead_duty = q(0.0625);
+		p.i_threshold = q(0.125);
+		let mut st = CurrentState::new();
+		// 誤差0・飽和なし。アンチワインドアップは制限で削られた分だけを戻すので、積分は動かない
+		st.update(&p, q(0.25), &meas(0.25, 0.0, 0.0));
+		assert_eq!(st.i_sum.value(), Q3_28::ZERO);
 	}
 
 	#[test]

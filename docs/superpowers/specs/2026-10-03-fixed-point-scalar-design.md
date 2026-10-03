@@ -161,10 +161,13 @@ impl Integrator {
 
 1. `u_clamped = clamp(u, ±imax)`、`e = u_clamped - i`
 2. `v1 = kp*e + i_sum.value() + ke*w`
-3. `vlim = min(vmax, duty_max*vdc)`、`v2 = clamp(v1, ±vlim)`
-4. `i_sum.add_product(ki, e)`、`i_sum.add_product(kb, v2 - v1)`
-5. `duty = clamp(v2*vdc_inv + dead_duty*soft_sign(i, i_threshold), ±1)`
-6. Saturated 判定は現状通り（`u` が imax を超える、または v1 ≠ v2）
+3. デッドタイム補償を電圧に直して足す: `v2 = v1 + dead_duty*soft_sign(i, i_threshold)*vdc`
+4. `vlim = min(vmax, duty_max*vdc)`、`v3 = clamp(v2, ±vlim)`
+5. `i_sum.add_product(ki, e)`、`i_sum.add_product(kb, v3 - v2)`（戻すのは制限で削られた分だけ）
+6. `duty = clamp(v3*vdc_inv, ±1)`
+7. Saturated 判定: `u` が imax を超える、または v2 ≠ v3
+
+デッドタイム補償を電圧制限の前に足すので、補償込みでもデューティは `duty_max` を超えない。
 
 `soft_sign(i, th)`: `i >= th` なら `ONE`、`i <= -th` なら `-ONE`、それ以外は `i.unchecked_div(th)`（|i| < th かつ th > 0 なので結果は (-1, 1)）。
 
