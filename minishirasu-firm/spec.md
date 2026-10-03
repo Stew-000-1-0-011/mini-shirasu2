@@ -1,4 +1,4 @@
-# minisirasu-firm
+# minishirasu-firm
 モタドラmini-shirasuのハードウェア。
 
 board/下に基板の回路図等(sch, brd)がある。

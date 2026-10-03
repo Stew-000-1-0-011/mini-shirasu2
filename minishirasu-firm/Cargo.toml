@@ -1,20 +1,14 @@
 [package]
 # TODO(1) fix `authors` and `name` if you didn't use `cargo-generate`
-authors = ["shnsk"]
-name = "minisirasu-firm"
+authors = ["Stew-000-1-0-011"]
+name = "minishirasu-firm"
 edition = "2024"
 version = "0.1.0"
 
 
 [[bin]]
-name = "minisirasu-firm"
+name = "minishirasu-firm"
 path = "src/main.rs"
-test = false
-
-# ADCの生値をひたすらprintするだけの動作確認用
-[[bin]]
-name = "adc-monitor"
-path = "src/bin/adc_monitor.rs"
 test = false
 
 [lib]
