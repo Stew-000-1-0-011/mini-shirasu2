@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "md-core",
+    "minisirasu-firm",
+]
+resolver = "3"
+
+# ワークスペースではメンバーの [profile] は無視されるので、ここに置く
+# cargo build/run
+[profile.dev]
+# default is opt-level = '0', but that makes very
+# verbose machine code
+opt-level = 's'
+# trade compile speed for slightly better optimisations
+codegen-units = 1
+
+# cargo build/run --release
+[profile.release]
+opt-level = 's'
+codegen-units = 1
+lto = 'fat'
+# Leave the debug symbols in (default is no debug info)
+debug = 2
