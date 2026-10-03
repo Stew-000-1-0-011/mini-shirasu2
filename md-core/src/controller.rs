@@ -1,6 +1,6 @@
 // TODO: 上限による制限を上限と下限による制限に変更
 
-use crate::fixed::{Q3_28, Q3_60, Q16_16};
+use crate::fixed::{Divisor, Q3_28, Q3_60, Q16_16};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Saturated {
@@ -109,14 +109,14 @@ impl Integrator {
 }
 
 /// デッドタイム補償用の符号。0付近で暴れないよう、|i| < th の間は i/th で線形に鈍らせる
-fn soft_sign(i: Q3_28, th: Q3_28) -> Q3_28 {
-	if i >= th {
+fn soft_sign(i: Q3_28, th: Divisor) -> Q3_28 {
+	if i >= th.value() {
 		Q3_28::ONE
-	} else if i <= -th {
+	} else if i <= -th.value() {
 		-Q3_28::ONE
 	} else {
-		// |i| < th なので結果は(-1, 1)に収まる
-		i.unchecked_div(th)
+		// |i| < th なので結果は(-1, 1)に収まる。毎周期通るので、割り算ではなく逆数との掛け算にする
+		i.div_by(th)
 	}
 }
 
@@ -126,7 +126,7 @@ pub struct CurrentParam {
 	kb: Q3_28,  // アンチワインドアップ。ki(T込み) / kp
 	ke: Q3_28,
 	dead_duty: Q3_28,
-	i_threshold: Q3_28,  // 電流値が[-i_threshold, i_threshold]の間は符号を[-1, 1]に
+	i_threshold: Divisor,  // 電流値が[-i_threshold, i_threshold]の間は符号を[-1, 1]に
 	duty_max: Q3_28,
 	vmax: Q3_28,
 	imax: Q3_28,
@@ -164,7 +164,7 @@ impl CurrentParam {
 			kb: to_q("kb", kb)?,
 			ke: to_q("ke", c.ke * ob / vb)?,
 			dead_duty: to_q("dead_duty", dead_duty)?,
-			i_threshold,
+			i_threshold: Divisor::new(i_threshold),
 			duty_max: to_q("duty_max", duty_max)?,
 			vmax: to_q("vmax", vmax / vb)?,
 			imax: to_q("imax", imax / ib)?,
@@ -349,7 +349,7 @@ mod tests {
 			kb: q(kb),
 			ke: Q3_28::ZERO,
 			dead_duty: Q3_28::ZERO,
-			i_threshold: q(1.0),
+			i_threshold: Divisor::new(q(1.0)),
 			duty_max: q(1.0),
 			vmax: q(vmax),
 			imax: q(7.0),
@@ -396,7 +396,7 @@ mod tests {
 		assert_close(p.kb, 0.008333334);         // 1000 * 5e-5 / 6
 		assert_close(p.ke, 0.25);                // 0.02 * 300 / 24
 		assert_close(p.dead_duty, 0.02);
-		assert_close(p.i_threshold, 0.05);       // 0.5 / 10
+		assert_close(p.i_threshold.value(), 0.05);  // 0.5 / 10
 		assert_close(p.duty_max, 0.95);
 		assert_close(p.vmax, 0.8333333);         // 20 / 24
 		assert_close(p.imax, 0.8);               // 8 / 10
@@ -705,26 +705,26 @@ mod tests {
 
 	#[test]
 	fn soft_sign_is_sign_outside_threshold() {
-		assert_eq!(soft_sign(q(0.5), q(0.125)), Q3_28::ONE);
-		assert_eq!(soft_sign(q(-0.5), q(0.125)), -Q3_28::ONE);
+		assert_eq!(soft_sign(q(0.5), Divisor::new(q(0.125))), Q3_28::ONE);
+		assert_eq!(soft_sign(q(-0.5), Divisor::new(q(0.125))), -Q3_28::ONE);
 		// しきい値ちょうども±1
-		assert_eq!(soft_sign(q(0.125), q(0.125)), Q3_28::ONE);
-		assert_eq!(soft_sign(q(-0.125), q(0.125)), -Q3_28::ONE);
+		assert_eq!(soft_sign(q(0.125), Divisor::new(q(0.125))), Q3_28::ONE);
+		assert_eq!(soft_sign(q(-0.125), Divisor::new(q(0.125))), -Q3_28::ONE);
 	}
 
 	#[test]
 	fn soft_sign_is_linear_inside_threshold() {
-		assert_close(soft_sign(q(0.25), q(0.5)), 0.5);
-		assert_close(soft_sign(q(-0.125), q(0.5)), -0.25);
-		assert_close(soft_sign(Q3_28::ZERO, q(0.5)), 0.0);
+		assert_close(soft_sign(q(0.25), Divisor::new(q(0.5))), 0.5);
+		assert_close(soft_sign(q(-0.125), Divisor::new(q(0.5))), -0.25);
+		assert_close(soft_sign(Q3_28::ZERO, Divisor::new(q(0.5))), 0.0);
 	}
 
 	#[test]
 	fn soft_sign_with_zero_threshold_does_not_divide() {
 		// しきい値がpu変換の丸めで0になっても0除算しない
-		assert_eq!(soft_sign(q(0.5), Q3_28::ZERO), Q3_28::ONE);
-		assert_eq!(soft_sign(q(-0.5), Q3_28::ZERO), -Q3_28::ONE);
-		assert_eq!(soft_sign(Q3_28::ZERO, Q3_28::ZERO), Q3_28::ONE);
+		assert_eq!(soft_sign(q(0.5), Divisor::new(Q3_28::ZERO)), Q3_28::ONE);
+		assert_eq!(soft_sign(q(-0.5), Divisor::new(Q3_28::ZERO)), -Q3_28::ONE);
+		assert_eq!(soft_sign(Q3_28::ZERO, Divisor::new(Q3_28::ZERO)), Q3_28::ONE);
 	}
 
 	// ---- 電流制御 ----
@@ -776,7 +776,7 @@ mod tests {
 	fn current_update_adds_dead_time_compensation_as_voltage() {
 		let mut p = bare_current_param(0.5, 0.0, 0.0, 7.0);
 		p.dead_duty = q(0.0625);
-		p.i_threshold = q(0.125);
+		p.i_threshold = Divisor::new(q(0.125));
 		let mut st = CurrentState::new();
 		// v = 0.25 + 0.0625*soft_sign(0.25)*0.5 = 0.28125 -> duty = 0.5625
 		assert_close(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).0, 0.5625);
@@ -786,7 +786,7 @@ mod tests {
 	fn current_dead_time_duty_is_softened_near_zero_current() {
 		let mut p = bare_current_param(0.0, 0.0, 0.0, 7.0);
 		p.dead_duty = q(0.125);
-		p.i_threshold = q(0.5);
+		p.i_threshold = Divisor::new(q(0.5));
 		let mut st = CurrentState::new();
 		// i=0.25 はしきい値0.5の内側なので 0.125*0.5 = 0.0625
 		assert_close(st.update(&p, q(0.25), &meas(0.25, 0.0, 0.0)).0, 0.0625);
@@ -798,7 +798,7 @@ mod tests {
 		let mut p = bare_current_param(2.0, 0.0, 0.0, 7.0);
 		p.duty_max = q(0.75);
 		p.dead_duty = q(0.0625);
-		p.i_threshold = q(0.125);
+		p.i_threshold = Divisor::new(q(0.125));
 		let mut st = CurrentState::new();
 		// v = 2*0.5 = 1.0 に補償を足しても、0.75*0.5 = 0.375 で頭打ち -> duty 0.75
 		assert_close(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).0, 0.75);
@@ -811,7 +811,7 @@ mod tests {
 	fn current_dead_time_compensation_alone_is_not_saturation() {
 		let mut p = bare_current_param(0.5, 0.0, 0.0, 7.0);
 		p.dead_duty = q(0.0625);
-		p.i_threshold = q(0.125);
+		p.i_threshold = Divisor::new(q(0.125));
 		let mut st = CurrentState::new();
 		// 補償を足しても制限に届かなければ飽和ではない(電流の向きによらず)
 		assert_eq!(st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0)).1, Saturated::NotSaturated);
@@ -823,7 +823,7 @@ mod tests {
 		// PIの出力0.25は制限0.26の内側だが、補償0.03125を足すと超える
 		let mut p = bare_current_param(0.5, 0.0, 0.0, 0.26);
 		p.dead_duty = q(0.0625);
-		p.i_threshold = q(0.125);
+		p.i_threshold = Divisor::new(q(0.125));
 		let mut st = CurrentState::new();
 		let (duty, saturated) = st.update(&p, q(0.75), &meas(0.25, 0.0, 0.0));
 		assert_close(duty, 0.52);
@@ -834,7 +834,7 @@ mod tests {
 	fn current_dead_time_compensation_does_not_leak_into_integral() {
 		let mut p = bare_current_param(0.0, 0.0, 0.5, 7.0);
 		p.dead_duty = q(0.0625);
-		p.i_threshold = q(0.125);
+		p.i_threshold = Divisor::new(q(0.125));
 		let mut st = CurrentState::new();
 		// 誤差0・飽和なし。アンチワインドアップは制限で削られた分だけを戻すので、積分は動かない
 		st.update(&p, q(0.25), &meas(0.25, 0.0, 0.0));

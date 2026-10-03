@@ -3,6 +3,7 @@
 //! - `Q3_28`: per-unitの信号とゲイン。範囲は[-8, 8)
 //! - `Q3_60`: 積分器。範囲は[-8, 8)で、Q3_28同士の積を丸めずに持てる
 //! - `Q16_16`: 位置。1回転 = 1.0、範囲は[-32768, 32768)
+//! - `Divisor`: 毎周期の割り算を掛け算で済ませるための、除数とその逆数
 //!
 //! 既定は固定小数点で、feature `f32` を有効にすると中身が浮動小数点になる。
 //! どちらでもAPIと飽和の振る舞いは同じ。
@@ -11,12 +12,12 @@
 #[cfg(not(feature = "f32"))]
 mod int;
 #[cfg(not(feature = "f32"))]
-pub use int::{Q3_28, Q3_60, Q16_16};
+pub use int::{Divisor, Q3_28, Q3_60, Q16_16};
 
 #[cfg(feature = "f32")]
 mod float;
 #[cfg(feature = "f32")]
-pub use float::{Q3_28, Q3_60, Q16_16};
+pub use float::{Divisor, Q3_28, Q3_60, Q16_16};
 
 #[cfg(test)]
 mod tests {
@@ -172,6 +173,50 @@ mod tests {
 	fn q3_28_converts_to_other_formats() {
 		assert_close(q(1.25).to_q3_60().to_f32(), 1.25);
 		assert_close(q(-1.5).to_q16_16().to_f32(), -1.5);
+	}
+
+	// ---- Divisor ----
+
+	#[test]
+	fn divisor_keeps_its_value() {
+		assert_eq!(Divisor::new(q(0.125)).value(), q(0.125));
+		assert_eq!(Divisor::new(Q3_28::ZERO).value(), Q3_28::ZERO);
+	}
+
+	#[test]
+	fn div_by_matches_division() {
+		assert_close(q(0.25).div_by(Divisor::new(q(0.5))).to_f32(), 0.5);
+		assert_close(q(-0.125).div_by(Divisor::new(q(0.5))).to_f32(), -0.25);
+		assert_close(Q3_28::ZERO.div_by(Divisor::new(q(0.5))).to_f32(), 0.0);
+		// 2進で割り切れない組み合わせ
+		assert_close(q(0.1).div_by(Divisor::new(q(0.3))).to_f32(), 1.0 / 3.0);
+		assert_close(q(-2.0).div_by(Divisor::new(q(7.0))).to_f32(), -2.0 / 7.0);
+	}
+
+	#[test]
+	fn div_by_works_when_reciprocal_exceeds_q3_28_range() {
+		// 1 / 0.05 = 20 はQ3.28に入らないが、商は(-1, 1)に収まる
+		let d = Divisor::new(q(0.05));
+		assert_close(q(0.01).div_by(d).to_f32(), 0.2);
+		assert_close(q(-0.04).div_by(d).to_f32(), -0.8);
+		// 分解能に近い小さな除数
+		let d = Divisor::new(q(1e-6));
+		assert_close(q(5e-7).div_by(d).to_f32(), q(5e-7).to_f32() / q(1e-6).to_f32());
+	}
+
+	#[test]
+	fn div_by_is_odd_symmetric() {
+		let d = Divisor::new(q(0.3));
+		for x in [0.01, 0.1, 0.123456, 0.29] {
+			assert_eq!(q(-x).div_by(d), -q(x).div_by(d), "x: {x}");
+		}
+	}
+
+	#[test]
+	#[cfg(debug_assertions)]
+	#[should_panic]
+	fn div_by_out_of_range_panics_in_debug() {
+		let _ = q(0.5).div_by(Divisor::new(q(0.25)));
 	}
 
 	// ---- Q3_60 ----

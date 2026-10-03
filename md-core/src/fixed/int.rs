@@ -97,6 +97,16 @@ impl Q3_28 {
 		Q3_28(q as i32)
 	}
 
+	/// self / d を、逆数との掛け算で求める。|self| < d であることを呼び出し側が保証する。
+	/// 0に向けて切り捨てる。厳密な商との差は1LSB以内。
+	/// debugビルドでは違反を検出する。releaseでは検査せず、違反時の結果は不定
+	pub fn div_by(self, d: Divisor) -> Self {
+		debug_assert!(self.abs() < d.d, "div_by out of range: {:?} / {:?}", self, d.d);
+		// |self| < d なので、積は 2^60 未満でi64に収まる
+		let mag = ((self.0.unsigned_abs() as i64).wrapping_mul(d.inv) >> 32) as i32;
+		Q3_28(if self.0 < 0 { -mag } else { mag })
+	}
+
 	pub fn to_q3_60(self) -> Q3_60 {
 		Q3_60((self.0 as i64) << 32)
 	}
@@ -141,6 +151,26 @@ impl Mul for Q3_28 {
 	type Output = Self;
 	fn mul(self, rhs: Self) -> Self {
 		Q3_28(sat_i32((self.0 as i64 * rhs.0 as i64) >> Self::FRAC))
+	}
+}
+
+/// 除数と、その逆数。64bitの割り算は遅いので、制御周期の中では `Q3_28::div_by` で掛け算にする。
+/// 逆数はQ3.28の範囲を超えることがあるので、2^60倍した整数で持つ
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Divisor {
+	d: Q3_28,
+	inv: i64,
+}
+
+impl Divisor {
+	/// 設定時に呼ぶ。dが0以下なら逆数は0になり、`div_by` には使えない
+	pub fn new(d: Q3_28) -> Self {
+		let inv = if d.0 > 0 { (1i64 << 60) / d.0 as i64 } else { 0 };
+		Divisor { d, inv }
+	}
+
+	pub fn value(self) -> Q3_28 {
+		self.d
 	}
 }
 
