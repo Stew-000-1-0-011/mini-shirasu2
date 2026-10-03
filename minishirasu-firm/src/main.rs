@@ -37,7 +37,7 @@ mod app {
     use md_core::controller::{CurrentState, Measurement, Saturated};
     use md_core::encoder::EncoderState;
     use md_core::fixed::{Q3_28, Q16_16};
-    use minishirasu_firm::bench::{self, Script};
+    use minishirasu_firm::bench::{self, Capture, Sample, Script};
     use minishirasu_firm::cascade::{self, Cascade, Setpoint};
     use minishirasu_firm::config::{self, BuildError, InnerParams, OuterParams, Settings};
     use minishirasu_firm::protocol::{MAX_ENCODED, Message, Status, StreamParser};
@@ -57,6 +57,8 @@ mod app {
         outer: Option<OuterParams>,
         telemetry: Telemetry,
         tx: TxQueues,
+        /// 電流の波形の記録。feature = "bench" のときだけ使う
+        capture: Capture,
     }
 
     #[init]
@@ -92,6 +94,7 @@ mod app {
                     flags: 0,
                 },
                 tx: TxQueues::new(),
+                capture: Capture::new(),
             },
             TaskInits {
                 idle: Idle,
@@ -99,6 +102,7 @@ mod app {
                     state: CurrentState::new(),
                     epoch: 0,
                     offset_sum: 0,
+                    warmup: 8,
                     offset_count: 0,
                     offset: 0,
                     timing_ok: phase_ok,
@@ -122,7 +126,7 @@ mod app {
                     elapsed_ms: 0,
                     bench_ms: 0,
                 },
-                bench: Bench { script: Script::new(), logged_ms: 0 },
+                bench: Bench { script: Script::new(), logged_ms: 0, dump: None },
                 can_rx: CanRx { rx, target: StreamParser::new(), command: StreamParser::new() },
                 can_tx: CanTx { tx },
                 command: Command { settings: Settings::new(), config_error: Some(config::id::VDCMAX) },
@@ -143,10 +147,12 @@ mod app {
     }
 
     /// ADC変換完了割り込み(20kHz、ONパルスの中央でトリガ)。電流制御
-    #[task(binds = ADC1_2, priority = 4, shared = [link, mode, inner])]
+    #[task(binds = ADC1_2, priority = 4, shared = [link, mode, inner, capture])]
     struct CurrentLoop {
         state: CurrentState,
         epoch: u32,
+        /// 起動直後に読み捨てる残りの回数
+        warmup: u8,
         offset_sum: u32,
         offset_count: u32,
         /// isenseのオフセット(ADC生値)
@@ -170,6 +176,13 @@ mod app {
             // 谷でトリガされていれば、変換(約5us)が終わった今はアップカウント中。
             // ダウンカウント中なら、トリガの設定が違うか、割り込みが20us近く遅れて山を越えたか
             let after_peak = board::counting_down();
+
+            // 最初の割り込みは、init中に終わった変換の完了が保留されていたもので、
+            // 割り込みを許可した瞬間に入る。位相がトリガと無関係なので、判定にも平均にも使わない
+            if self.warmup > 0 {
+                self.warmup -= 1;
+                return;
+            }
 
             // 起動直後はオフセットを測る。出力は無効(EN=Low)なのでシャントの電流は0
             if self.offset_count < OFFSET_SAMPLES {
@@ -232,6 +245,13 @@ mod app {
             let compare = pwm::duty_to_compare(duty, config::PWM_ARR);
             board::set_compare(compare.0, compare.1);
             let written = board::phase();
+            if cfg!(feature = "bench") {
+                let sample = Sample {
+                    isense: ((adc.isense as i32 - self.offset as i32) * self.applied_sign) as i16,
+                    compare: compare.0 as i16 - compare.1 as i16,
+                };
+                s.capture.lock(|c| c.push(sample));
+            }
             let sign = pwm::compare_sign(compare);
             if after_peak || board::update_flag() {
                 // 書く前に山を越えてしまった。次の周期に出るのは1つ前に書いた値。
@@ -538,11 +558,13 @@ mod app {
 
     /// CANなしの実機試験(feature = "bench")。bench::PLANの手順を、CANで受けたときと同じ入口に流し込み、
     /// 状態をログに出す。featureがなければ起動されない
-    #[sw_task(priority = 1, shared = [link, outer_cmd, mode, outer, telemetry])]
+    #[sw_task(priority = 1, shared = [link, outer_cmd, mode, outer, telemetry, capture])]
     struct Bench {
         script: Script,
         /// 最後に状態をログに出した時刻[ms]
         logged_ms: u32,
+        /// 波形の記録を書き出している途中なら、次に書き出す位置
+        dump: Option<usize>,
     }
 
     impl RticSwTask for Bench {
@@ -555,14 +577,21 @@ mod app {
                 bench::Action::Command(message) => {
                     if let Message::SetMode { mode } = message {
                         defmt::info!("bench: SetMode({})", mode);
+                        // 出力を止めたら、波形の記録を書き出す
+                        if mode == 0 {
+                            self.dump = Some(0);
+                        }
                     }
                     let _ = Command::spawn(CommandInput::Message(message));
+                    return;
                 }
                 bench::Action::Target(message) => {
                     let mode = s.mode.lock(|m| *m);
                     let scale = s.outer.lock(|p| p.as_ref().map(|p| p.scale));
                     match scale.and_then(|scale| cascade::setpoint_from_message(&message, mode, &scale)) {
                         Some(setpoint) => {
+                            // 目標値が電流ループに届く(次の1ms周期)より前から記録する
+                            s.capture.lock(|c| c.arm());
                             s.outer_cmd.lock(|c| c.setpoint = setpoint);
                             defmt::info!("bench: target set");
                         }
@@ -570,6 +599,26 @@ mod app {
                     }
                 }
                 bench::Action::Nothing => {}
+            }
+
+            // 波形の記録を少しずつ書き出す。電流ループを待たせないよう、ロックの中では写すだけにする
+            if let Some(start) = self.dump {
+                let mut chunk = [Sample { isense: 0, compare: 0 }; 16];
+                let n = s.capture.lock(|c| c.read(start, &mut chunk));
+                if n == 0 {
+                    defmt::info!("cap end: {} samples", start);
+                    self.dump = None;
+                } else {
+                    let mut isense = [0i16; 16];
+                    let mut compare = [0i16; 16];
+                    for (k, sample) in chunk[..n].iter().enumerate() {
+                        isense[k] = sample.isense;
+                        compare[k] = sample.compare;
+                    }
+                    defmt::info!("cap {}: i={} c={}", start, &isense[..n], &compare[..n]);
+                    self.dump = Some(start + n);
+                }
+                return;
             }
 
             if now.wrapping_sub(self.logged_ms) < bench::LOG_PERIOD_MS {
