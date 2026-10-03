@@ -5,4 +5,5 @@ pub mod config;
 pub mod protocol;
 pub mod pwm;
 pub mod sense;
+pub mod state;
 pub mod txbuf;
