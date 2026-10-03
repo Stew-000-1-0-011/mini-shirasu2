@@ -65,8 +65,10 @@ pub struct Config {
 /// Configからの変換に失敗した理由。文字列はConfigのフィールド名
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ConfigError {
-	/// 正でなければならない値が0以下、またはNaN
+	/// 正でなければならない値が0以下、NaN、無限大
 	NotPositive(&'static str),
+	/// 0以上でなければならない値が負
+	Negative(&'static str),
 	/// per-unit変換後の値が型の範囲に収まらない、またはNaN
 	OutOfRange(&'static str),
 }
@@ -74,6 +76,11 @@ pub enum ConfigError {
 /// 正の有限値ならそのまま返す
 fn positive(name: &'static str, v: f32) -> Result<f32, ConfigError> {
 	if v > 0.0 && v.is_finite() { Ok(v) } else { Err(ConfigError::NotPositive(name)) }
+}
+
+/// 0以上ならそのまま返す。NaNは後段のto_qでOutOfRangeになるのでここでは通す
+fn non_negative(name: &'static str, v: f32) -> Result<f32, ConfigError> {
+	if v < 0.0 { Err(ConfigError::Negative(name)) } else { Ok(v) }
 }
 
 fn to_q(name: &'static str, v: f32) -> Result<Q3_28, ConfigError> {
@@ -133,17 +140,25 @@ impl CurrentParam {
 		let t = positive("cperiod", c.cperiod)?;
 		let ckp = positive("ckp", c.ckp)?;
 		let ith = positive("i_threshold", c.i_threshold)?;
+		let cki = non_negative("cki", c.cki)?;
+		let dead_duty = non_negative("dead_duty", c.dead_duty)?;
+		let duty_max = non_negative("duty_max", c.duty_max)?;
+		let vmax = non_negative("vmax", c.vmax)?;
+		let imax = non_negative("imax", c.imax)?;
+		if duty_max > 1.0 {
+			return Err(ConfigError::OutOfRange("duty_max"));
+		}
 
 		Ok(CurrentParam {
 			kp: to_q("ckp", ckp * ib / vb)?,
-			ki: to_q("cki", c.cki * t * ib / vb)?,
-			kb: to_q("cki", c.cki * t / ckp)?,
+			ki: to_q("cki", cki * t * ib / vb)?,
+			kb: to_q("cki", cki * t / ckp)?,
 			ke: to_q("ke", c.ke * ob / vb)?,
-			dead_duty: to_q("dead_duty", c.dead_duty)?,
+			dead_duty: to_q("dead_duty", dead_duty)?,
 			i_threshold: to_q("i_threshold", ith / ib)?,
-			duty_max: to_q("duty_max", c.duty_max)?,
-			vmax: to_q("vmax", c.vmax / vb)?,
-			imax: to_q("imax", c.imax / ib)?,
+			duty_max: to_q("duty_max", duty_max)?,
+			vmax: to_q("vmax", vmax / vb)?,
+			imax: to_q("imax", imax / ib)?,
 		})
 	}
 }
@@ -207,12 +222,15 @@ impl VelocityParam {
 		let ib = positive("ibase", c.ibase)?;
 		let ob = positive("wbase", c.wbase)?;
 		let t = positive("wperiod", c.wperiod)?;
+		let wkp = non_negative("wkp", c.wkp)?;
+		let wki = non_negative("wki", c.wki)?;
+		let wmax = non_negative("wmax", c.wmax)?;
 
 		Ok(VelocityParam {
-			kp: to_q("wkp", c.wkp * ob / ib)?,
-			ki: to_q("wki", c.wki * t * ob / ib)?,
+			kp: to_q("wkp", wkp * ob / ib)?,
+			ki: to_q("wki", wki * t * ob / ib)?,
 			b: to_q("wb", c.wb)?,
-			wmax: to_q("wmax", c.wmax / ob)?,
+			wmax: to_q("wmax", wmax / ob)?,
 		})
 	}
 }
@@ -264,11 +282,13 @@ pub struct PositionParam {
 impl PositionParam {
 	pub fn new(c: &Config) -> Result<PositionParam, ConfigError> {
 		let ob = positive("wbase", c.wbase)?;
+		let pkp = non_negative("pkp", c.pkp)?;
+		let pmax = non_negative("pmax", c.pmax)?;
 
 		Ok(PositionParam {
 			// 位置は回転単位なので、rad/sへ直す2πが入る
-			kp: to_q("pkp", c.pkp * core::f32::consts::TAU / ob)?,
-			pmax: Q16_16::checked_from_f32(c.pmax).ok_or(ConfigError::OutOfRange("pmax"))?,
+			kp: to_q("pkp", pkp * core::f32::consts::TAU / ob)?,
+			pmax: Q16_16::checked_from_f32(pmax).ok_or(ConfigError::OutOfRange("pmax"))?,
 		})
 	}
 }
@@ -453,6 +473,86 @@ mod tests {
 		let mut c = config();
 		c.pkp = f32::NAN;
 		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::OutOfRange("pkp")));
+	}
+
+	#[test]
+	fn param_new_rejects_negative_limits() {
+		let mut c = config();
+		c.imax = -1.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::Negative("imax")));
+
+		let mut c = config();
+		c.vmax = -1.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::Negative("vmax")));
+
+		let mut c = config();
+		c.duty_max = -0.5;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::Negative("duty_max")));
+
+		let mut c = config();
+		c.dead_duty = -0.02;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::Negative("dead_duty")));
+
+		let mut c = config();
+		c.wmax = -1.0;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::Negative("wmax")));
+
+		let mut c = config();
+		c.pmax = -1.0;
+		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::Negative("pmax")));
+	}
+
+	#[test]
+	fn param_new_rejects_negative_gains() {
+		let mut c = config();
+		c.cki = -1.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::Negative("cki")));
+
+		let mut c = config();
+		c.wkp = -0.05;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::Negative("wkp")));
+
+		let mut c = config();
+		c.wki = -0.5;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::Negative("wki")));
+
+		let mut c = config();
+		c.pkp = -1.0;
+		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::Negative("pkp")));
+	}
+
+	#[test]
+	fn param_new_rejects_duty_max_above_one() {
+		let mut c = config();
+		c.duty_max = 1.5;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::OutOfRange("duty_max")));
+
+		c.duty_max = 1.0;
+		assert!(CurrentParam::new(&c).is_ok());
+	}
+
+	#[test]
+	fn param_new_accepts_zero_gains_and_limits() {
+		let mut c = config();
+		c.cki = 0.0;
+		c.imax = 0.0;
+		assert!(CurrentParam::new(&c).is_ok());
+
+		let mut c = config();
+		c.wki = 0.0;
+		assert!(VelocityParam::new(&c).is_ok());
+	}
+
+	#[test]
+	fn param_new_allows_negative_ke_and_wb() {
+		let mut c = config();
+		c.ke = -0.02;
+		let p = CurrentParam::new(&c).unwrap();
+		assert_close(p.ke, -0.25);
+
+		let mut c = config();
+		c.wb = -0.5;
+		assert!(VelocityParam::new(&c).is_ok());
 	}
 
 	// ---- 母線電圧 ----
