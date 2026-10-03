@@ -78,3 +78,16 @@ ADCはONパルスの中央(カウンタの谷)で発火するようにする。
 6. 電流モードで小さい正の電流を流し、`Status`の速度が正になることを見る。負なら`encoder_reversed`を切り替える。
 7. 速度モード、位置モードを順に試す。
 8. ログに`current loop missed the peak`が出ないことを見る。出る場合は電流ループの計算が25µsの半周期に間に合っていない。
+
+### CANなしで試す
+
+`cargo run --release --features bench`で書き込むと、CANからの指示なしで動く。
+試験の内容は`src/bench.rs`の`PLAN`を書き換えて決める。
+
+- `settings`を`SetParam`として順に設定し、`mode`に入り、`target`を与え、`run_ms`後に出力を止める。
+  CANで受けたときと同じ入口に流し込むので、設定の検証と状態機械は同じコードを通る。
+- `mode`が0なら設定だけして、出力は無効のままにする。
+- 100msごとに`bench: mode=... i=... w=... th=... vdc=... temp=... flags=... late=...`をログに出す。
+- コマンドが拒否されると`nack: command=... reason=... param=...`がログに出る。
+
+CANの初期化は走るので、トランシーバがつながっていない基板では起動時に止まる。

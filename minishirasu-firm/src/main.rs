@@ -37,6 +37,7 @@ mod app {
     use md_core::controller::{CurrentState, Measurement, Saturated};
     use md_core::encoder::EncoderState;
     use md_core::fixed::{Q3_28, Q16_16};
+    use minishirasu_firm::bench::{self, Script};
     use minishirasu_firm::cascade::{self, Cascade, Setpoint};
     use minishirasu_firm::config::{self, BuildError, InnerParams, OuterParams, Settings};
     use minishirasu_firm::protocol::{MAX_ENCODED, Message, Status, StreamParser};
@@ -119,7 +120,9 @@ mod app {
                     last_count: None,
                     epoch: 0,
                     elapsed_ms: 0,
+                    bench_ms: 0,
                 },
+                bench: Bench { script: Script::new(), logged_ms: 0 },
                 can_rx: CanRx { rx, target: StreamParser::new(), command: StreamParser::new() },
                 can_tx: CanTx { tx },
                 command: Command { settings: Settings::new(), config_error: Some(config::id::VDCMAX) },
@@ -164,13 +167,15 @@ mod app {
             board::clear_update_flag();
             let adc = board::read_adc();
             // 谷でトリガされていれば、変換(約11us)が終わった今はアップカウント中。
-            // 半周期は25usなので、割り込みが14us以上遅れない限り判定を誤らない
-            if board::counting_down() {
-                self.timing_ok = false;
-            }
+            // ダウンカウント中なら、トリガの設定が違うか、割り込みが14us以上遅れて山を越えたか
+            let after_peak = board::counting_down();
 
             // 起動直後はオフセットを測る。出力は無効(EN=Low)なのでシャントの電流は0
             if self.offset_count < OFFSET_SAMPLES {
+                // この間は割り込みを長く禁止するものがないので、設定の間違いとみなす
+                if after_peak {
+                    self.timing_ok = false;
+                }
                 self.offset_sum += adc.isense as u32;
                 self.offset_count += 1;
                 if self.offset_count == OFFSET_SAMPLES {
@@ -187,7 +192,8 @@ mod app {
             let (i_target, mut enabled, epoch, w, vdc, vdc_inv) =
                 s.link.lock(|l| (l.i_target, l.enabled, l.epoch, l.w, l.vdc, l.vdc_inv));
 
-            if board::nfault_asserted() || !self.timing_ok {
+            let nfault = board::nfault_asserted();
+            if nfault || !self.timing_ok {
                 let entered = s.mode.lock(|m| {
                     let entered = *m != Mode::Fault;
                     *m = Mode::Fault;
@@ -197,7 +203,7 @@ mod app {
                     board::output_disable();
                     s.link.lock(|l| l.enabled = false);
                     let _ = Report::spawn(ReportKind::Fault);
-                    defmt::error!("fault: output disabled");
+                    defmt::error!("fault: output disabled (nfault={} timing_ok={})", nfault, self.timing_ok);
                 }
                 enabled = false;
             }
@@ -225,8 +231,9 @@ mod app {
             let compare = pwm::duty_to_compare(duty, config::PWM_ARR);
             board::set_compare(compare.0, compare.1);
             let sign = pwm::compare_sign(compare);
-            if board::update_flag() {
-                // 書く前に山を越えてしまった。次の周期に出るのは1つ前に書いた値
+            if after_peak || board::update_flag() {
+                // 書く前に山を越えてしまった。次の周期に出るのは1つ前に書いた値。
+                // 低い優先度のタスクが割り込みを長く禁止する(ログの出力など)と起きる
                 self.applied_sign = self.queued_sign;
                 self.late = self.late.wrapping_add(1);
             } else {
@@ -264,6 +271,8 @@ mod app {
         last_count: Option<u16>,
         epoch: u32,
         elapsed_ms: u32,
+        /// 起動からの時間[ms]。feature = "bench" のときだけ進める
+        bench_ms: u32,
     }
 
     impl RticSwTask for OuterLoop {
@@ -271,6 +280,13 @@ mod app {
 
         fn exec(&mut self, input: OuterInput) {
             let mut s = self.shared();
+
+            if cfg!(feature = "bench") {
+                self.bench_ms = self.bench_ms.wrapping_add(1);
+                if self.bench_ms % bench::TICK_MS == 0 {
+                    let _ = Bench::spawn(self.bench_ms);
+                }
+            }
 
             let delta = match self.last_count {
                 Some(last) => sense::count_delta(last, input.encoder),
@@ -498,13 +514,82 @@ mod app {
 
             let response = match result {
                 Ok(()) => Message::Ack { command },
-                Err(reject) => Message::Nack { command, reason: reject.reason, param: reject.param },
+                Err(reject) => {
+                    defmt::warn!(
+                        "nack: command={=u8:#x} reason={} param={=u8:#x}",
+                        command,
+                        reject.reason,
+                        reject.param
+                    );
+                    Message::Nack { command, reason: reject.reason, param: reject.param }
+                }
             };
             let mut buf = [0u8; MAX_ENCODED];
             let n = response.encode(&mut buf);
             // 入りきらなければ捨てる
             s.tx.lock(|q| q.push(TxStream::Response, &buf[..n]));
             can::kick();
+        }
+    }
+
+    /// CANなしの実機試験(feature = "bench")。bench::PLANの手順を、CANで受けたときと同じ入口に流し込み、
+    /// 状態をログに出す。featureがなければ起動されない
+    #[sw_task(priority = 1, shared = [link, outer_cmd, mode, outer, telemetry])]
+    struct Bench {
+        script: Script,
+        /// 最後に状態をログに出した時刻[ms]
+        logged_ms: u32,
+    }
+
+    impl RticSwTask for Bench {
+        type SpawnInput = u32;
+
+        fn exec(&mut self, now: u32) {
+            let mut s = self.shared();
+
+            match self.script.next(&bench::PLAN, now) {
+                bench::Action::Command(message) => {
+                    if let Message::SetMode { mode } = message {
+                        defmt::info!("bench: SetMode({})", mode);
+                    }
+                    let _ = Command::spawn(CommandInput::Message(message));
+                }
+                bench::Action::Target(message) => {
+                    let mode = s.mode.lock(|m| *m);
+                    let scale = s.outer.lock(|p| p.as_ref().map(|p| p.scale));
+                    match scale.and_then(|scale| cascade::setpoint_from_message(&message, mode, &scale)) {
+                        Some(setpoint) => {
+                            s.outer_cmd.lock(|c| c.setpoint = setpoint);
+                            defmt::info!("bench: target set");
+                        }
+                        None => defmt::warn!("bench: target rejected (mode={})", mode.code()),
+                    }
+                }
+                bench::Action::Nothing => {}
+            }
+
+            if now.wrapping_sub(self.logged_ms) < bench::LOG_PERIOD_MS {
+                return;
+            }
+            self.logged_ms = now;
+            // 設定が揃うまでは物理単位に直せない
+            let Some(scale) = s.outer.lock(|p| p.as_ref().map(|p| p.scale)) else {
+                return;
+            };
+            let t = s.telemetry.lock(|t| *t);
+            let mode = s.mode.lock(|m| *m);
+            let late = s.link.lock(|l| l.late);
+            defmt::info!(
+                "bench: mode={} i={}A w={}rad/s th={}rev vdc={}V temp={} flags={} late={}",
+                mode.code(),
+                scale.current_a(t.i),
+                scale.velocity_rad_s(t.w),
+                t.th.to_f32(),
+                scale.voltage_v(t.vdc),
+                t.temp,
+                t.flags,
+                late
+            );
         }
     }
 
