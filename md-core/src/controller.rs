@@ -1,7 +1,6 @@
 // TODO: 上限による制限を上限と下限による制限に変更
 
 use crate::fixed::{Q3_28, Q3_60, Q16_16};
-use crate::scalar::Scalar;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Saturated {
@@ -18,28 +17,67 @@ pub struct Measurement {
 	pub w: Q3_28,
 	pub th: Q16_16,  // 1回転 = 1.0
 }
-// TODO: バリデート
+
+impl Measurement {
+	/// 母線電圧を更新する。逆数がQ3.28に収まらない(vdcが1/8以下 = 母線電圧がvdcmax/8以下)
+	/// ときは何も更新せずfalseを返す
+	pub fn update_vdc(&mut self, vdc: Q3_28) -> bool {
+		if vdc <= Q3_28::ZERO {
+			return false;
+		}
+		match Q3_28::ONE.checked_div(vdc) {
+			Some(vdc_inv) => {
+				self.vdc = vdc;
+				self.vdc_inv = vdc_inv;
+				true
+			},
+			None => false,
+		}
+	}
+}
+
+/// 設定値。物理単位で持ち、各Param::newでper-unitに変換する
 pub struct Config {
-	pub vdcmax: Scalar,  // Vdcの最大値
-	pub ke: Scalar,  // 逆起電力
+	pub vdcmax: f32,  // [V] Vdcの最大値。電圧の基準値を兼ねる。母線電圧がこの1/8以下のときは測定値を更新しない
+	pub ibase: f32,  // [A] 電流の基準値(測定フルスケール)
+	pub wbase: f32,  // [rad/s] 速度の基準値(最高速度程度)
+	pub ke: f32,  // [V/(rad/s)] 逆起電力
 
-	pub cperiod: Scalar,  // 電流制御周期
-	pub ckp: Scalar,  // 電流P制御
-	pub cki: Scalar,  // 電流I制御, 実際には同時に掛けられるTも入れる
-	pub dead_duty: Scalar,  // デッドタイムによる誤差デューティー比
-	pub i_threshold_inv: Scalar,  // 電流値が[-i_threshold, i_threshold]の間は符号を[-1, 1]に
-	pub kb: Scalar,  // アンチワインドアップ, kb = ki / kp。kiにTが入ってるので、これもT倍になる
-	pub duty_max: Scalar,  // シャント抵抗に電流を流したり、ブートストラップするための上限(vmaxとminをとられる)
-	pub vmax: Scalar,  // 出力電圧上限(duty_maxとminをとられる)
-	pub imax: Scalar,  // 目標電流上限(出力が必ずしも超えないとは限らないことに注意！)
+	pub cperiod: f32,  // [s] 電流制御周期
+	pub ckp: f32,  // [V/A] 電流P制御
+	pub cki: f32,  // [V/(A*s)] 電流I制御
+	pub dead_duty: f32,  // デッドタイムによる誤差デューティー比
+	pub i_threshold: f32,  // [A] 電流値が[-i_threshold, i_threshold]の間は符号を[-1, 1]に
+	pub duty_max: f32,  // シャント抵抗に電流を流したり、ブートストラップするための上限(vmaxとminをとられる)
+	pub vmax: f32,  // [V] 出力電圧上限(duty_maxとminをとられる)
+	pub imax: f32,  // [A] 目標電流上限(出力が必ずしも超えないとは限らないことに注意！)
 
-	pub wkp: Scalar,  // 速度P制御
-	pub wki: Scalar,  // 速度I制御。実際は同時に掛けられるTも入れる
-	pub wb: Scalar,  // 速度P項の目標値への重み
-	pub wmax: Scalar,  // 目標速度上限
+	pub wperiod: f32,  // [s] 速度制御周期
+	pub wkp: f32,  // [A/(rad/s)] 速度P制御
+	pub wki: f32,  // [A/(rad/s*s)] 速度I制御
+	pub wb: f32,  // 速度P項の目標値への重み
+	pub wmax: f32,  // [rad/s] 目標速度上限
 
-	pub pkp: Scalar,  // 位置P制御
-	pub pmax: Scalar,  // 目標位置上限
+	pub pkp: f32,  // [1/s] 位置P制御
+	pub pmax: f32,  // [回転] 目標位置上限
+}
+
+/// Configからの変換に失敗した理由。文字列はConfigのフィールド名
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ConfigError {
+	/// 正でなければならない値が0以下、またはNaN
+	NotPositive(&'static str),
+	/// per-unit変換後の値が型の範囲に収まらない、またはNaN
+	OutOfRange(&'static str),
+}
+
+/// 正の有限値ならそのまま返す
+fn positive(name: &'static str, v: f32) -> Result<f32, ConfigError> {
+	if v > 0.0 && v.is_finite() { Ok(v) } else { Err(ConfigError::NotPositive(name)) }
+}
+
+fn to_q(name: &'static str, v: f32) -> Result<Q3_28, ConfigError> {
+	Q3_28::checked_from_f32(v).ok_or(ConfigError::OutOfRange(name))
 }
 
 /// 積分器。積を丸めずにQ3.60で積算し、Q3.28の分解能より小さい増分が消えないようにする
@@ -85,6 +123,29 @@ pub struct CurrentParam {
 	duty_max: Q3_28,
 	vmax: Q3_28,
 	imax: Q3_28,
+}
+
+impl CurrentParam {
+	pub fn new(c: &Config) -> Result<CurrentParam, ConfigError> {
+		let vb = positive("vdcmax", c.vdcmax)?;
+		let ib = positive("ibase", c.ibase)?;
+		let ob = positive("wbase", c.wbase)?;
+		let t = positive("cperiod", c.cperiod)?;
+		let ckp = positive("ckp", c.ckp)?;
+		let ith = positive("i_threshold", c.i_threshold)?;
+
+		Ok(CurrentParam {
+			kp: to_q("ckp", ckp * ib / vb)?,
+			ki: to_q("cki", c.cki * t * ib / vb)?,
+			kb: to_q("cki", c.cki * t / ckp)?,
+			ke: to_q("ke", c.ke * ob / vb)?,
+			dead_duty: to_q("dead_duty", c.dead_duty)?,
+			i_threshold: to_q("i_threshold", ith / ib)?,
+			duty_max: to_q("duty_max", c.duty_max)?,
+			vmax: to_q("vmax", c.vmax / vb)?,
+			imax: to_q("imax", c.imax / ib)?,
+		})
+	}
 }
 
 pub struct CurrentState {
@@ -141,6 +202,21 @@ pub struct VelocityParam {
 	wmax: Q3_28,  // 目標速度上限
 }
 
+impl VelocityParam {
+	pub fn new(c: &Config) -> Result<VelocityParam, ConfigError> {
+		let ib = positive("ibase", c.ibase)?;
+		let ob = positive("wbase", c.wbase)?;
+		let t = positive("wperiod", c.wperiod)?;
+
+		Ok(VelocityParam {
+			kp: to_q("wkp", c.wkp * ob / ib)?,
+			ki: to_q("wki", c.wki * t * ob / ib)?,
+			b: to_q("wb", c.wb)?,
+			wmax: to_q("wmax", c.wmax / ob)?,
+		})
+	}
+}
+
 pub struct VelocityState {
 	w_sum: Integrator,
 }
@@ -183,6 +259,18 @@ impl VelocityState {
 pub struct PositionParam {
 	kp: Q3_28,
 	pmax: Q16_16,
+}
+
+impl PositionParam {
+	pub fn new(c: &Config) -> Result<PositionParam, ConfigError> {
+		let ob = positive("wbase", c.wbase)?;
+
+		Ok(PositionParam {
+			// 位置は回転単位なので、rad/sへ直す2πが入る
+			kp: to_q("pkp", c.pkp * core::f32::consts::TAU / ob)?,
+			pmax: Q16_16::checked_from_f32(c.pmax).ok_or(ConfigError::OutOfRange("pmax"))?,
+		})
+	}
 }
 
 pub struct PositionState {}
@@ -242,6 +330,160 @@ mod tests {
 	/// kiは周期Tを含んだ値
 	fn vparam(kp: f32, ki: f32, b: f32, wmax: f32) -> VelocityParam {
 		VelocityParam { kp: q(kp), ki: q(ki), b: q(b), wmax: q(wmax) }
+	}
+
+	/// 物理単位の設定例。基準値は V_b=24V, I_b=10A, ω_b=300rad/s
+	fn config() -> Config {
+		Config {
+			vdcmax: 24.0,
+			ibase: 10.0,
+			wbase: 300.0,
+			ke: 0.02,
+			cperiod: 5e-5,
+			ckp: 6.0,
+			cki: 1000.0,
+			dead_duty: 0.02,
+			i_threshold: 0.5,
+			duty_max: 0.95,
+			vmax: 20.0,
+			imax: 8.0,
+			wperiod: 1e-3,
+			wkp: 0.05,
+			wki: 0.5,
+			wb: 0.8,
+			wmax: 250.0,
+			pkp: 20.0,
+			pmax: 100.0,
+		}
+	}
+
+	// ---- Param::new ----
+
+	#[test]
+	fn current_param_new_converts_to_per_unit() {
+		let p = CurrentParam::new(&config()).unwrap();
+		assert_close(p.kp, 2.5);                 // 6 * 10 / 24
+		assert_close(p.ki, 0.020833334);         // 1000 * 5e-5 * 10 / 24
+		assert_close(p.kb, 0.008333334);         // 1000 * 5e-5 / 6
+		assert_close(p.ke, 0.25);                // 0.02 * 300 / 24
+		assert_close(p.dead_duty, 0.02);
+		assert_close(p.i_threshold, 0.05);       // 0.5 / 10
+		assert_close(p.duty_max, 0.95);
+		assert_close(p.vmax, 0.8333333);         // 20 / 24
+		assert_close(p.imax, 0.8);               // 8 / 10
+	}
+
+	#[test]
+	fn velocity_param_new_converts_to_per_unit() {
+		let p = VelocityParam::new(&config()).unwrap();
+		assert_close(p.kp, 1.5);                 // 0.05 * 300 / 10
+		assert_close(p.ki, 0.015);               // 0.5 * 1e-3 * 300 / 10
+		assert_close(p.b, 0.8);
+		assert_close(p.wmax, 0.8333333);         // 250 / 300
+	}
+
+	#[test]
+	fn position_param_new_converts_to_per_unit() {
+		let p = PositionParam::new(&config()).unwrap();
+		assert_close(p.kp, 0.41887903);          // 20 * 2π / 300
+		assert!((p.pmax.to_f32() - 100.0).abs() < 1e-3);  // 回転のまま
+	}
+
+	#[test]
+	fn param_new_rejects_non_positive_values() {
+		let mut c = config();
+		c.ckp = 0.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("ckp")));
+
+		let mut c = config();
+		c.i_threshold = 0.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("i_threshold")));
+
+		let mut c = config();
+		c.cperiod = -1e-4;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("cperiod")));
+
+		let mut c = config();
+		c.vdcmax = 0.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmax")));
+
+		let mut c = config();
+		c.ibase = 0.0;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::NotPositive("ibase")));
+
+		let mut c = config();
+		c.wperiod = 0.0;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::NotPositive("wperiod")));
+
+		let mut c = config();
+		c.wbase = 0.0;
+		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::NotPositive("wbase")));
+	}
+
+	#[test]
+	fn param_new_rejects_values_out_of_range() {
+		// 100 * 10 / 24 = 41.7 は Q3.28 に入らない
+		let mut c = config();
+		c.ckp = 100.0;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::OutOfRange("ckp")));
+
+		let mut c = config();
+		c.wkp = 1.0;  // 1 * 300 / 10 = 30
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::OutOfRange("wkp")));
+
+		let mut c = config();
+		c.pmax = 1e6;
+		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::OutOfRange("pmax")));
+	}
+
+	#[test]
+	fn param_new_rejects_nan_and_infinity() {
+		let mut c = config();
+		c.ke = f32::NAN;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::OutOfRange("ke")));
+
+		let mut c = config();
+		c.vdcmax = f32::NAN;
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmax")));
+
+		let mut c = config();
+		c.wki = f32::INFINITY;
+		assert_eq!(VelocityParam::new(&c).err(), Some(ConfigError::OutOfRange("wki")));
+
+		let mut c = config();
+		c.pkp = f32::NAN;
+		assert_eq!(PositionParam::new(&c).err(), Some(ConfigError::OutOfRange("pkp")));
+	}
+
+	// ---- 母線電圧 ----
+
+	#[test]
+	fn update_vdc_sets_voltage_and_inverse() {
+		let mut m = meas(0.0, 0.0, 0.0);
+		assert!(m.update_vdc(q(0.75)));
+		assert_close(m.vdc, 0.75);
+		assert_close(m.vdc_inv, 1.3333334);
+	}
+
+	#[test]
+	fn update_vdc_skips_when_inverse_does_not_fit() {
+		// 逆数が8未満に収まるのは vdc > 1/8 (母線電圧がvdcmax/8より大きい)ときだけ。
+		// 収まらなければ前回の値(0.5, 2.0)を保つ
+		for vdc in [0.125, 0.0625, 0.0, -0.5] {
+			let mut m = meas(0.0, 0.0, 0.0);
+			assert!(!m.update_vdc(q(vdc)), "vdc: {vdc}");
+			assert_close(m.vdc, 0.5);
+			assert_close(m.vdc_inv, 2.0);
+		}
+	}
+
+	#[test]
+	fn update_vdc_just_above_one_eighth_stays_in_range() {
+		let mut m = meas(0.0, 0.0, 0.0);
+		assert!(m.update_vdc(q(0.13)));
+		assert!(m.vdc_inv < Q3_28::MAX);
+		// 8に近い値なので、丸めの分だけ許容誤差を広げる
+		assert!((m.vdc_inv.to_f32() - 1.0 / 0.13).abs() < 1e-4);
 	}
 
 	// ---- Integrator ----
