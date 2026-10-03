@@ -9,6 +9,10 @@ name = "minishirasu-firm"
 path = "src/main.rs"
 test = false
 
+[features]
+# CANなしの実機試験。内容は src/bench.rs の定数で決める
+bench = []
+
 [dependencies]
 md-core = { path = "../md-core" }
 cobs = { version = "0.5", default-features = false }
