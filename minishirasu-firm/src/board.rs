@@ -142,9 +142,11 @@ fn adc_init(p: &pac::Peripherals) {
     while adc.cr2.read().cal().bit_is_set() {}
 
     // サンプリング時間(ADCCLK=12MHz)。ISENSEBはONパルスが短くても測れるよう最短にする
-    // ISENSEB: 7.5cyc(0b001), VSENSE: 28.5cyc(0b011), TEMP: 55.5cyc(0b101)
-    // 変換は合計 (7.5 + 28.5 + 55.5) + 3 * 12.5 = 129cyc = 10.75us
-    adc.smpr2.modify(|_, w| w.smp6().bits(0b101).smp8().bits(0b011).smp9().bits(0b001));
+    // 3チャネルとも7.5cyc(0b001)。変換は合計 3 * (7.5 + 12.5) = 60cyc = 5us。
+    // 電流ループは変換が終わってから山までにコンペア値を書く必要があり、計算に約14usかかる。
+    // 変換が長いと間に合わない(VSENSE 28.5cyc、TEMP 55.5cycの合計10.75usでは足りなかった)。
+    // VSENSEとTEMPはピンにコンデンサ(100n, 1u)があるので、短いサンプル時間でも読める
+    adc.smpr2.modify(|_, w| w.smp6().bits(0b001).smp8().bits(0b001).smp9().bits(0b001));
 
     // インジェクテッド3変換。JL=2のときJSQ2,JSQ3,JSQ4の順に変換され、JDR1..3に入る
     adc.jsqr.write(|w| unsafe {
@@ -247,6 +249,13 @@ pub fn update_flag() -> bool {
 /// TIM1がダウンカウント中(山から谷へ向かっている)か
 pub fn counting_down() -> bool {
     tim1().cr1.read().dir().bit_is_set()
+}
+
+/// 谷からの経過[カウント]。0が谷、ARRが山、2*ARRが次の谷。1カウントは1/72us。
+/// CNTと向きを別々に読むので、山や谷のごく近くでは不正確
+pub fn phase() -> u16 {
+    let cnt = tim1().cnt.read().bits() as u16;
+    if counting_down() { (2 * PWM_ARR).saturating_sub(cnt) } else { cnt }
 }
 
 /// コンペア値を書く。プリロードなので、次の更新イベント(山)で反映される

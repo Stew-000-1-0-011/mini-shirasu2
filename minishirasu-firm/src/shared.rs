@@ -21,6 +21,10 @@ pub struct Link {
     pub saturated: Saturated,
     /// CCRの書き込みが山に間に合わなかった回数
     pub late: u32,
+    /// 電流ループに入った時点と、コンペア値を書き終えた時点の位相(board::phase)の最大値。
+    /// 読む側が0に戻す
+    pub entry_max: u16,
+    pub write_max: u16,
 }
 
 impl Link {
@@ -36,6 +40,8 @@ impl Link {
             i: Q3_28::ZERO,
             saturated: Saturated::NotSaturated,
             late: 0,
+            entry_max: 0,
+            write_max: 0,
         }
     }
 }

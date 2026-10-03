@@ -166,8 +166,9 @@ mod app {
             // 山の更新フラグを下ろしておき、コンペア値を書いたあとで山を越えていないかを見る
             board::clear_update_flag();
             let adc = board::read_adc();
-            // 谷でトリガされていれば、変換(約11us)が終わった今はアップカウント中。
-            // ダウンカウント中なら、トリガの設定が違うか、割り込みが14us以上遅れて山を越えたか
+            let entry = board::phase();
+            // 谷でトリガされていれば、変換(約5us)が終わった今はアップカウント中。
+            // ダウンカウント中なら、トリガの設定が違うか、割り込みが20us近く遅れて山を越えたか
             let after_peak = board::counting_down();
 
             // 起動直後はオフセットを測る。出力は無効(EN=Low)なのでシャントの電流は0
@@ -230,6 +231,7 @@ mod app {
 
             let compare = pwm::duty_to_compare(duty, config::PWM_ARR);
             board::set_compare(compare.0, compare.1);
+            let written = board::phase();
             let sign = pwm::compare_sign(compare);
             if after_peak || board::update_flag() {
                 // 書く前に山を越えてしまった。次の周期に出るのは1つ前に書いた値。
@@ -246,6 +248,8 @@ mod app {
                 l.i = i;
                 l.saturated = saturated;
                 l.late = late;
+                l.entry_max = l.entry_max.max(entry);
+                l.write_max = l.write_max.max(written);
             });
 
             self.tick += 1;
@@ -578,9 +582,10 @@ mod app {
             };
             let t = s.telemetry.lock(|t| *t);
             let mode = s.mode.lock(|m| *m);
-            let late = s.link.lock(|l| l.late);
+            let (late, entry, write) = s.link.lock(|l| (l.late, l.entry_max, l.write_max));
+            // entry, write: 電流ループの開始と、コンペア値の書き込みの位相の最大値。1800が山で、72が1us
             defmt::info!(
-                "bench: mode={} i={}A w={}rad/s th={}rev vdc={}V temp={} flags={} late={}",
+                "bench: mode={} i={}A w={}rad/s th={}rev vdc={}V temp={} flags={} late={} entry={} write={}",
                 mode.code(),
                 scale.current_a(t.i),
                 scale.velocity_rad_s(t.w),
@@ -588,8 +593,15 @@ mod app {
                 scale.voltage_v(t.vdc),
                 t.temp,
                 t.flags,
-                late
+                late,
+                entry,
+                write
             );
+            // このログ自身が割り込みを遅らせるので、その1回を数えないよう書いたあとで戻す
+            s.link.lock(|l| {
+                l.entry_max = 0;
+                l.write_max = 0;
+            });
         }
     }
 

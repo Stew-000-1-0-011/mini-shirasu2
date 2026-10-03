@@ -28,7 +28,8 @@ pub const PLAN: Plan = Plan {
         (id::DEAD_DUTY, 0.02),
         (id::I_THRESHOLD, 0.5),
         (id::DUTY_MAX, 0.95),
-        (id::VMAX, 20.0),
+        // モーター未接続でPWMを見る段階。飽和したときのデューティが 6 / 母線電圧 になる
+        (id::VMAX, 6.0),
         (id::IMAX, 8.0),
         (id::WKP, 0.05),
         (id::WKI, 0.5),
@@ -37,13 +38,14 @@ pub const PLAN: Plan = Plan {
         (id::PKP, 20.0),
         (id::PMAX, 100.0),
         (id::ACCEL_TO_CURRENT, 0.01),
-        (id::ENCODER_CPR, 8192.0),
+        // 駆動軸1回転あたり。8192で駆動軸1回転が約2.7revと読めたので 8192 * 2.7(粗い実測)
+        (id::ENCODER_CPR, 22118.0),
         (id::W_FILTER_ALPHA, 0.2),
         (id::ENCODER_REVERSED, 0.0),
     ],
-    mode: 0,
-    target: Message::TargetCurrent { current: 0.0 },
-    run_ms: 2000,
+    mode: 1,
+    target: Message::TargetCurrent { current: 0.5 },
+    run_ms: 5000,
 };
 
 /// Benchタスクを起こす周期[ms]。1回につきコマンドを1つ進める
@@ -122,11 +124,6 @@ mod tests {
             assert!(s.set(id, value).is_ok(), "id {id:#x}");
         }
         assert!(s.build().is_ok());
-    }
-
-    #[test]
-    fn default_plan_keeps_output_disabled() {
-        assert_eq!(PLAN.mode, 0);
     }
 
     #[test]
