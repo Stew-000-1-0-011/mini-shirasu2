@@ -113,12 +113,12 @@ f32 版の `checked_div` / `unchecked_div` / `checked_from_f32` も、固定小�
 | VelocityParam.wmax | wmax/ω_b | Q3_28 |
 | PositionParam.kp | pkp·2π/ω_b | Q3_28 |
 | PositionParam.pmax | pmax | Q16_16 |
-| （Measurement 用）vdc_min | vdcmin/V_b | Q3_28 |
+| CurrentParam.vdc_min | vdcmin/V_b（母線電圧の更新で使う） | Q3_28 |
 
 `ConfigError` を返す条件（どのフィールドかを示す）:
 
 - 変換後の値が型の範囲に収まらない
-- `vdcmin < vdcmax/8`（vdc_inv が Q3.28 に収まらない）
+- `vdcmin <= vdcmax/8`（vdc_inv が Q3.28 に収まらない。ちょうど 1/8 でも逆数が 8 になり範囲外）
 - `i_threshold <= 0`、`ckp <= 0`、各周期 `<= 0`、基準値 `<= 0`
 
 Param の型は pub、フィールドは非公開のまま（RTICX の shared に置く想定）。

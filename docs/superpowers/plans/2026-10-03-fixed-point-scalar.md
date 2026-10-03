@@ -26,7 +26,7 @@
 
 仕様が暗に求めているが、素直に書いたテストでは踏まない入力。各行のテストは、担当タスクのテストコードに含めてある。
 
-1. **母線電圧が下限ちょうど**：`vdcmin == vdcmax/8` だと逆数がちょうど 8 になり Q3.28 に収まらない。`BusParam::new` はこれをエラーにし、`vdc == vdc_min` での `update_vdc` は範囲内の `vdc_inv` を返すこと（Task 4）。
+1. **母線電圧が下限ちょうど**：`vdcmin == vdcmax/8` だと逆数がちょうど 8 になり Q3.28 に収まらない。`CurrentParam::new` はこれをエラーにし、`vdc == vdc_min` での `update_vdc` は範囲内の `vdc_inv` を返すこと（Task 4）。
 2. **デッドタイムしきい値が丸めで 0 になる**：`i_threshold` が極端に小さいと pu 変換後に 0 になる。`soft_sign` は 0 除算せず ±1 を返すこと（Task 3）。
 3. **Config に NaN や無限大が入る**：パニックせず `ConfigError` を返すこと（Task 4）。
 4. **位置誤差が 8 回転を超える**：ゲインを掛ける前に飽和して速度指令が弱まらないこと（Task 3）。
@@ -41,7 +41,7 @@
 | `md-core/src/fixed.rs`（新規） | backend の切り替えと `pub use`、両 backend 共通のテスト |
 | `md-core/src/fixed/int.rs`（新規） | 固定小数点（i32 / i64）実装 |
 | `md-core/src/fixed/float.rs`（新規） | 浮動小数点（f32 / f64）実装 |
-| `md-core/src/controller.rs` | 新しい型への移行、`Integrator`、`soft_sign`、`Config`、`ConfigError`、`BusParam`、各 `Param::new` |
+| `md-core/src/controller.rs` | 新しい型への移行、`Integrator`、`soft_sign`、`Config`、`ConfigError`、各 `Param::new`、`Measurement::update_vdc` |
 | `md-core/src/scalar.rs` | 最後に削除 |
 | `docs/数値表現.md`（新規） | per-unit 基準値と型の使い分けの説明 |
 
@@ -1574,6 +1574,8 @@ git commit -m "Port controllers to fixed-point per-unit types"
 
 設計書からの修正点が 1 つある。設計書は「`vdcmin < vdcmax/8` でエラー」としているが、`vdcmin == vdcmax/8` ちょうどでも逆数が 8 になり Q3.28（8 未満）に収まらない。そこで条件を「`vdcmin <= vdcmax/8` でエラー」とし、丸めの影響を避けるため per-unit 変換後の値で判定する。
 
+母線電圧の下限（per-unit）は専用の構造体を作らず、`CurrentParam` に `vdc_min` として持たせる。検証と変換は `CurrentParam::new` で行う。
+
 **Files:**
 - Modify: `md-core/src/controller.rs`
 
@@ -1585,12 +1587,14 @@ git commit -m "Port controllers to fixed-point per-unit types"
   - `CurrentParam::new(c: &Config) -> Result<CurrentParam, ConfigError>`
   - `VelocityParam::new(c: &Config) -> Result<VelocityParam, ConfigError>`
   - `PositionParam::new(c: &Config) -> Result<PositionParam, ConfigError>`
-  - `pub struct BusParam`、`BusParam::new(c: &Config) -> Result<BusParam, ConfigError>`
-  - `Measurement::update_vdc(&mut self, p: &BusParam, vdc: Q3_28) -> bool`（更新したら `true`、下限未満でスキップしたら `false`）
+  - `CurrentParam` に非公開フィールド `vdc_min: Q3_28` を追加
+  - `Measurement::update_vdc(&mut self, p: &CurrentParam, vdc: Q3_28) -> bool`（更新したら `true`、下限未満でスキップしたら `false`）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
-`md-core/src/controller.rs` のテストモジュール内、`vparam` 関数の直後に追加:
+`md-core/src/controller.rs` のテストモジュール内の `bare_current_param` で、`imax: q(7.0),` の次の行に `vdc_min: q(0.5),` を追加する（`CurrentParam` に増えるフィールドのぶん）。
+
+続けて、`vparam` 関数の直後に追加:
 
 ```rust
 	/// 物理単位の設定例。基準値は V_b=24V, I_b=10A, ω_b=300rad/s
@@ -1633,6 +1637,7 @@ git commit -m "Port controllers to fixed-point per-unit types"
 		assert_close(p.duty_max, 0.95);
 		assert_close(p.vmax, 0.8333333);         // 20 / 24
 		assert_close(p.imax, 0.8);               // 8 / 10
+		assert_close(p.vdc_min, 0.5);            // 12 / 24
 	}
 
 	#[test]
@@ -1720,30 +1725,24 @@ git commit -m "Port controllers to fixed-point per-unit types"
 	// ---- 母線電圧 ----
 
 	#[test]
-	fn bus_param_new_converts_vdc_min() {
-		let p = BusParam::new(&config()).unwrap();
-		assert_close(p.vdc_min, 0.5);  // 12 / 24
-	}
-
-	#[test]
-	fn bus_param_new_rejects_vdc_min_too_low() {
+	fn current_param_new_rejects_vdc_min_too_low() {
 		// vdc_inv = V_b / vdc が8未満に収まるには vdcmin > vdcmax/8 が必要
 		let mut c = config();
 		c.vdcmin = 3.0;  // ちょうど 24/8
-		assert_eq!(BusParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
 
 		let mut c = config();
 		c.vdcmin = 2.0;
-		assert_eq!(BusParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::VdcMinTooLow));
 
 		let mut c = config();
 		c.vdcmin = 0.0;
-		assert_eq!(BusParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmin")));
+		assert_eq!(CurrentParam::new(&c).err(), Some(ConfigError::NotPositive("vdcmin")));
 	}
 
 	#[test]
 	fn update_vdc_sets_voltage_and_inverse() {
-		let p = BusParam::new(&config()).unwrap();
+		let p = CurrentParam::new(&config()).unwrap();
 		let mut m = meas(0.0, 0.0, 0.0);
 		assert!(m.update_vdc(&p, q(0.75)));
 		assert_close(m.vdc, 0.75);
@@ -1752,7 +1751,7 @@ git commit -m "Port controllers to fixed-point per-unit types"
 
 	#[test]
 	fn update_vdc_skips_below_minimum() {
-		let p = BusParam::new(&config()).unwrap();
+		let p = CurrentParam::new(&config()).unwrap();
 		let mut m = meas(0.0, 0.0, 0.0);
 		// 下限0.5pu未満なら、前回の値(0.5, 2.0)を保つ
 		assert!(!m.update_vdc(&p, q(0.25)));
@@ -1765,7 +1764,7 @@ git commit -m "Port controllers to fixed-point per-unit types"
 		// 下限を許される限界近くまで下げても、逆数が範囲内に収まる
 		let mut c = config();
 		c.vdcmin = 3.1;  // 24/8 = 3.0 をわずかに上回る
-		let p = BusParam::new(&c).unwrap();
+		let p = CurrentParam::new(&c).unwrap();
 		let mut m = meas(0.0, 0.0, 0.0);
 		let vdc_min = p.vdc_min;
 		assert!(m.update_vdc(&p, vdc_min));
@@ -1778,7 +1777,7 @@ git commit -m "Port controllers to fixed-point per-unit types"
 - [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test -p md-core`
-Expected: コンパイルエラー（`no function or associated item named `new` found for struct `CurrentParam``、`cannot find struct ... `BusParam``、`Config` のフィールド不一致など）
+Expected: コンパイルエラー（`no function or associated item named `new` found for struct `CurrentParam``、`struct `CurrentParam` has no field named `vdc_min``、`Config` のフィールド不一致など）
 
 - [ ] **Step 3: Config を物理単位の f32 に置き換える**
 
@@ -1842,7 +1841,7 @@ fn to_q(name: &'static str, v: f32) -> Result<Q3_28, ConfigError> {
 ```rust
 impl Measurement {
 	/// 母線電圧を更新する。下限未満なら何も更新せずfalseを返す
-	pub fn update_vdc(&mut self, p: &BusParam, vdc: Q3_28) -> bool {
+	pub fn update_vdc(&mut self, p: &CurrentParam, vdc: Q3_28) -> bool {
 		if vdc < p.vdc_min {
 			return false;
 		}
@@ -1854,25 +1853,10 @@ impl Measurement {
 }
 ```
 
-`to_q` 関数の直後に追加:
+`CurrentParam` 構造体の `imax: Q3_28,` の次の行にフィールドを追加:
 
 ```rust
-/// 母線電圧の測定に関するパラメータ
-pub struct BusParam {
-	vdc_min: Q3_28,
-}
-impl BusParam {
-	pub fn new(c: &Config) -> Result<BusParam, ConfigError> {
-		let vb = positive("vdcmax", c.vdcmax)?;
-		let vmin = positive("vdcmin", c.vdcmin)?;
-		let vdc_min = to_q("vdcmin", vmin / vb)?;
-		// 変換後の値で判定する。1/8ちょうどだと逆数が8になり範囲を外れる
-		if vdc_min <= to_q("vdcmin", 0.125)? {
-			return Err(ConfigError::VdcMinTooLow);
-		}
-		Ok(BusParam { vdc_min })
-	}
-}
+	vdc_min: Q3_28,  // これ未満では母線電圧を更新しない。1/8より大きい
 ```
 
 - [ ] **Step 5: 各 Param::new を実装する**
@@ -1883,6 +1867,12 @@ impl BusParam {
 impl CurrentParam {
 	pub fn new(c: &Config) -> Result<CurrentParam, ConfigError> {
 		let vb = positive("vdcmax", c.vdcmax)?;
+		let vmin = positive("vdcmin", c.vdcmin)?;
+		let vdc_min = to_q("vdcmin", vmin / vb)?;
+		// 変換後の値で判定する。1/8ちょうどだと逆数が8になり範囲を外れる
+		if vdc_min <= to_q("vdcmin", 0.125)? {
+			return Err(ConfigError::VdcMinTooLow);
+		}
 		let ib = positive("ibase", c.ibase)?;
 		let ob = positive("wbase", c.wbase)?;
 		let t = positive("cperiod", c.cperiod)?;
@@ -1899,6 +1889,7 @@ impl CurrentParam {
 			duty_max: to_q("duty_max", c.duty_max)?,
 			vmax: to_q("vmax", c.vmax / vb)?,
 			imax: to_q("imax", c.imax / ib)?,
+			vdc_min,
 		})
 	}
 }
@@ -2029,7 +2020,7 @@ feature `f32` を有効にすると、同じ API のまま中身が浮動小数�
 
 - 加減乗算と符号反転、`abs` はあふれたら型の上限・下限に飽和する。ラップして符号が反転することはない。これは安全策であり、通常動作で飽和に達しないよう基準値とゲインを選ぶ。
 - 除算は `checked_div`（範囲外・0 除算で `None`）と `unchecked_div`（範囲内であることを呼び出し側が保証。debug ビルドでは違反を検出）だけ。逆数や除算は割る数が小さいだけで範囲を外れるので、値の範囲を知っている側が使い分ける。
-  - 母線電圧の逆数：`vdcmin > vdcmax/8` を `BusParam::new` で検証し、下限未満の測定値では更新しないので、逆数は必ず範囲内に収まる。
+  - 母線電圧の逆数：`vdcmin > vdcmax/8` を `CurrentParam::new` で検証し、下限未満の測定値では更新しないので、逆数は必ず範囲内に収まる。
   - デッドタイム補償：|i| がしきい値未満のときだけ `i / しきい値` を計算するので、結果は (-1, 1) に収まる。
 - 型をまたぐ変換は明示的な関数（`to_q3_28` など）だけで、暗黙の変換はない。
 ```
