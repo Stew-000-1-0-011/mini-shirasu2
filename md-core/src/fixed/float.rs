@@ -72,6 +72,13 @@ impl Q3_28 {
 		Q3_28(self.0 / rhs.0)
 	}
 
+	/// self / d を、逆数との掛け算で求める。|self| < d であることを呼び出し側が保証する。
+	/// debugビルドでは違反を検出する。releaseでは検査せず、違反時の結果は不定
+	pub fn div_by(self, d: Divisor) -> Self {
+		debug_assert!(self.abs() < d.d, "div_by out of range: {:?} / {:?}", self, d.d);
+		Q3_28(self.0 * d.inv)
+	}
+
 	pub fn to_q3_60(self) -> Q3_60 {
 		Q3_60(self.0 as f64)
 	}
@@ -116,6 +123,25 @@ impl Mul for Q3_28 {
 	type Output = Self;
 	fn mul(self, rhs: Self) -> Self {
 		Self::sat(self.0 * rhs.0)
+	}
+}
+
+/// 除数と、その逆数。固定小数点版に合わせて、制御周期の中では `Q3_28::div_by` で掛け算にする
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Divisor {
+	d: Q3_28,
+	inv: f32,
+}
+
+impl Divisor {
+	/// 設定時に呼ぶ。dが0以下なら逆数は0になり、`div_by` には使えない
+	pub fn new(d: Q3_28) -> Self {
+		let inv = if d.0 > 0.0 { 1.0 / d.0 } else { 0.0 };
+		Divisor { d, inv }
+	}
+
+	pub fn value(self) -> Q3_28 {
+		self.d
 	}
 }
 
