@@ -14,6 +14,8 @@ mod board;
 #[cfg(target_os = "none")]
 mod can;
 #[cfg(target_os = "none")]
+mod profile;
+#[cfg(target_os = "none")]
 mod shared;
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
@@ -33,7 +35,7 @@ const OFFSET_SAMPLES: u32 = 1024;
 #[rticx_cortex_m::app(device = stm32f1::stm32f103, dispatchers = [SPI1, SPI2])]
 mod app {
     use super::shared::{CommandInput, Link, OuterCmd, OuterInput, ReportKind, Telemetry};
-    use super::{OFFSET_SAMPLES, board, can};
+    use super::{OFFSET_SAMPLES, board, can, profile};
     use md_core::controller::{CurrentState, Measurement, Saturated};
     use md_core::encoder::EncoderState;
     use md_core::fixed::{Q3_28, Q16_16};
@@ -68,6 +70,9 @@ mod app {
         let phase_ok = board::check_update_phase();
         if !phase_ok {
             defmt::error!("update event is not at the peak: flip RCR_BEFORE_START in board.rs");
+        }
+        if cfg!(feature = "bench") {
+            profile::run();
         }
         // バスと同期するまで戻らないので、ここで止まったことがログでわかるようにする
         defmt::info!("waiting for CAN bus");
