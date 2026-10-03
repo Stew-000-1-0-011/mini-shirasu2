@@ -37,13 +37,15 @@ pub const PLAN: Plan = Plan {
         (id::DUTY_MAX, 0.95),
         // 電流の読みが外れても電流が上がりすぎないよう、電圧で抑える。1Vでは回らなかった。
         // 3Vなら、巻線抵抗が約0.2Ωとして軸が止まっていても15A程度まで
-        (id::VMAX, 3.0),
+        (id::VMAX, 4.0),
         (id::IMAX, 8.0),
-        (id::WKP, 0.05),
+        // 5Aで0.1秒に約11rad/s加速したことから、慣性を駆動軸で約2e-3 kg·m²と見て、低めから始める
+        (id::WKP, 0.1),
         (id::WKI, 0.5),
         (id::WB, 0.8),
-        (id::WMAX, 250.0),
-        (id::PKP, 20.0),
+        (id::WMAX, 20.0),
+        // 速度ループの応答(数rad/s)より十分遅くする
+        (id::PKP, 1.5),
         (id::PMAX, 100.0),
         (id::ACCEL_TO_CURRENT, 0.01),
         // 駆動軸1回転あたり。エンコーダ(AMT102-V、2048PPRで4逓倍後8192)は中間軸にあり、
@@ -53,9 +55,11 @@ pub const PLAN: Plan = Plan {
         // 正の電流で速度が負に出たので、エンコーダの向きを反転する
         (id::ENCODER_REVERSED, 1.0),
     ],
-    mode: 1,
-    target: Message::TargetCurrent { current: 5.0 },
-    run_ms: 2000,
+    // 書き込んだだけで回り出さないよう、コミットするときは0にしておく。試すときに1〜3にする
+    mode: 0,
+    // 駆動軸で+1回転(回転単位のQ16.16)
+    target: Message::TargetPosition { position: 65536, velocity_ff: 0.0, accel_ff: 0.0 },
+    run_ms: 5000,
 };
 
 /// Benchタスクを起こす周期[ms]。1回につきコマンドを1つ進める
