@@ -11,6 +11,8 @@ pub enum Mode {
     Position,
     /// 異常でラッチ。ResetFaultが来るまで抜けない
     Fault,
+    /// 電流制御を通さず、目標のデューティをそのままPWMに出す
+    Duty,
 }
 
 impl Mode {
@@ -22,12 +24,14 @@ impl Mode {
             Mode::Velocity => 2,
             Mode::Position => 3,
             Mode::Fault => 4,
+            // 異常(4)の番号を変えないよう、後ろに足す
+            Mode::Duty => 5,
         }
     }
 
     /// 出力を出して制御しているか
     pub fn is_active(self) -> bool {
-        matches!(self, Mode::Current | Mode::Velocity | Mode::Position)
+        matches!(self, Mode::Current | Mode::Velocity | Mode::Position | Mode::Duty)
     }
 }
 
@@ -91,6 +95,7 @@ pub fn decide(mode: Mode, message: &Message, config_error: Option<u8>) -> Result
                 1 => Mode::Current,
                 2 => Mode::Velocity,
                 3 => Mode::Position,
+                5 => Mode::Duty,
                 _ => return reject(nack::VALUE),
             };
             match config_error {
@@ -110,7 +115,7 @@ pub fn decide(mode: Mode, message: &Message, config_error: Option<u8>) -> Result
 mod tests {
     use super::*;
 
-    const ALL: [Mode; 5] = [Mode::Disabled, Mode::Current, Mode::Velocity, Mode::Position, Mode::Fault];
+    const ALL: [Mode; 6] = [Mode::Disabled, Mode::Current, Mode::Velocity, Mode::Position, Mode::Fault, Mode::Duty];
 
     fn reject(reason: u8, param: u8) -> Result<Action, Reject> {
         Err(Reject { reason, param })
@@ -119,13 +124,13 @@ mod tests {
     #[test]
     fn mode_codes_match_spec() {
         let codes: Vec<u8> = ALL.iter().map(|m| m.code()).collect();
-        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        assert_eq!(codes, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn only_control_modes_are_active() {
         let active: Vec<bool> = ALL.iter().map(|m| m.is_active()).collect();
-        assert_eq!(active, vec![false, true, true, true, false]);
+        assert_eq!(active, vec![false, true, true, true, false, true]);
     }
 
     #[test]
@@ -133,6 +138,7 @@ mod tests {
         assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 1 }, None), Ok(Action::Enter(Mode::Current)));
         assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 2 }, None), Ok(Action::Enter(Mode::Velocity)));
         assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 3 }, None), Ok(Action::Enter(Mode::Position)));
+        assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 5 }, None), Ok(Action::Enter(Mode::Duty)));
     }
 
     #[test]
@@ -157,6 +163,7 @@ mod tests {
     fn set_mode_rejects_unknown_mode() {
         // 4(異常)は要求できない
         assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 4 }, None), reject(nack::VALUE, 0));
+        assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 6 }, None), reject(nack::VALUE, 0));
         assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 0xFF }, None), reject(nack::VALUE, 0));
     }
 
@@ -165,6 +172,15 @@ mod tests {
         for mode in 0..=3 {
             assert_eq!(decide(Mode::Fault, &Message::SetMode { mode }, None), reject(nack::FAULT, 0));
         }
+    }
+
+    #[test]
+    fn duty_mode_needs_valid_config_and_switches_like_others() {
+        assert_eq!(decide(Mode::Disabled, &Message::SetMode { mode: 5 }, Some(0x08)), reject(nack::CONFIG, 0x08));
+        assert_eq!(decide(Mode::Duty, &Message::SetMode { mode: 1 }, None), Ok(Action::Enter(Mode::Current)));
+        assert_eq!(decide(Mode::Duty, &Message::SetMode { mode: 0 }, None), Ok(Action::Disable));
+        assert_eq!(decide(Mode::Fault, &Message::SetMode { mode: 5 }, None), reject(nack::FAULT, 0));
+        assert_eq!(decide(Mode::Duty, &Message::SetParam { id: 0x04, value: 6.0 }, None), reject(nack::ACTIVE, 0));
     }
 
     #[test]

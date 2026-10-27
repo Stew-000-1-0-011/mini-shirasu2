@@ -141,6 +141,15 @@ pub fn position_to_wire(th: Q16_16) -> i32 {
 pub struct InnerParams {
     pub current: CurrentParam,
     pub sense: SenseParam,
+    /// デューティ制御モードでの上限。CurrentParamの中の値は外から読めないので、別に持つ
+    duty_max: Q3_28,
+}
+
+impl InnerParams {
+    /// デューティ制御モードで、目標のデューティを ±duty_max で切る
+    pub fn limit_duty(&self, duty: Q3_28) -> Q3_28 {
+        duty.min(self.duty_max).max(-self.duty_max)
+    }
 }
 
 /// 速度・位置制御と通信が使うもの
@@ -262,7 +271,12 @@ impl Settings {
 
         let sense = SenseParam::new(c.ibase, c.vdcmax).map_err(invalid)?;
         Ok(Params {
-            inner: InnerParams { current: CurrentParam::new(&c).map_err(invalid)?, sense },
+            inner: InnerParams {
+                current: CurrentParam::new(&c).map_err(invalid)?,
+                sense,
+                // CurrentParam::newで0..=1を確かめてあるので、変換は失敗しない
+                duty_max: Q3_28::checked_from_f32(c.duty_max).ok_or(BuildError::Invalid(id::DUTY_MAX))?,
+            },
             outer: OuterParams {
                 velocity: VelocityParam::new(&c).map_err(invalid)?,
                 position: PositionParam::new(&c).map_err(invalid)?,
@@ -445,6 +459,17 @@ mod tests {
         let mut s = full_settings();
         s.set(id::W_FILTER_ALPHA, 2.0).unwrap();
         assert_eq!(s.build().err(), Some(BuildError::Invalid(id::W_FILTER_ALPHA)));
+    }
+
+    #[test]
+    fn inner_params_limit_duty_to_duty_max() {
+        let inner = full_settings().build().ok().unwrap().inner;
+        let q = |v: f32| Q3_28::checked_from_f32(v).unwrap();
+        assert_eq!(inner.limit_duty(q(0.5)), q(0.5));
+        assert_eq!(inner.limit_duty(q(-0.5)), q(-0.5));
+        // duty_max = 0.95
+        assert_eq!(inner.limit_duty(Q3_28::ONE), q(0.95));
+        assert_eq!(inner.limit_duty(-Q3_28::ONE), -q(0.95));
     }
 
     #[test]
