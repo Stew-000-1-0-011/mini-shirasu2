@@ -16,10 +16,10 @@ pub const OUTER_DIV: u32 = 20;
 pub const OUTER_PERIOD: f32 = 1e-3;
 
 // ストリームごとのCAN ID(標準ID)。小さいほど優先度が高い。複数台つなぐときは基板ごとに変える
-pub const CAN_ID_TARGET: u16 = 0x100;
-pub const CAN_ID_STATUS: u16 = 0x101;
-pub const CAN_ID_COMMAND: u16 = 0x200;
-pub const CAN_ID_RESPONSE: u16 = 0x201;
+pub const CAN_ID_TARGET: u16 = 0x114;
+pub const CAN_ID_STATUS: u16 = 0x124;
+pub const CAN_ID_COMMAND: u16 = 0x134;
+pub const CAN_ID_RESPONSE: u16 = 0x144;
 
 /// SetParamの設定ID
 pub mod id {

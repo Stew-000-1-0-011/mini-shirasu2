@@ -42,10 +42,10 @@ ADCはONパルスの中央(カウンタの谷)で発火するようにする。
 
 | ストリーム | 向き | 既定のID | メッセージ |
 |---|---|---|---|
-| 目標値 | 受信 | 0x100 | TargetCurrent, TargetVelocity, TargetPosition, TargetDuty |
-| 状態 | 送信 | 0x101 | Status |
-| コマンド | 受信 | 0x200 | SetMode, SetParam, ResetFault, SetOrigin |
-| 応答 | 送信 | 0x201 | Ack, Nack, FaultNotice |
+| 目標値 | 受信 | 0x114 | TargetCurrent, TargetVelocity, TargetPosition, TargetDuty |
+| 状態 | 送信 | 0x124 | Status |
+| コマンド | 受信 | 0x134 | SetMode, SetParam, ResetFault, SetOrigin |
+| 応答 | 送信 | 0x144 | Ack, Nack, FaultNotice |
 
 メッセージは `COBS( 種別 | ペイロード | CRC-8/SMBUS )` のあとに区切りの0x00。数値はリトルエンディアン。
 種別、ペイロード、設定ID、Nackの理由は設計文書の「プロトコル」を見ること。
