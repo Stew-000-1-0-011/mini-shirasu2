@@ -15,6 +15,7 @@ pub mod kind {
     pub const TARGET_CURRENT: u8 = 0x01;
     pub const TARGET_VELOCITY: u8 = 0x02;
     pub const TARGET_POSITION: u8 = 0x03;
+    pub const TARGET_DUTY: u8 = 0x04;
     pub const SET_MODE: u8 = 0x10;
     pub const SET_PARAM: u8 = 0x11;
     pub const RESET_FAULT: u8 = 0x12;
@@ -43,6 +44,8 @@ pub enum Message {
     TargetVelocity { velocity: f32, accel_ff: f32 },
     /// positionは回転単位のQ16.16
     TargetPosition { position: i32, velocity_ff: f32, accel_ff: f32 },
+    /// 電流制御を通さずにPWMへ出すデューティ(-1..=1)
+    TargetDuty { duty: f32 },
     SetMode { mode: u8 },
     SetParam { id: u8, value: f32 },
     ResetFault,
@@ -73,6 +76,7 @@ fn payload_len(kind: u8) -> Option<usize> {
         kind::TARGET_CURRENT => 4,
         kind::TARGET_VELOCITY => 8,
         kind::TARGET_POSITION => 12,
+        kind::TARGET_DUTY => 4,
         kind::SET_MODE => 1,
         kind::SET_PARAM => 5,
         kind::RESET_FAULT | kind::SET_ORIGIN | kind::FAULT_NOTICE => 0,
@@ -148,6 +152,7 @@ impl Message {
             Message::TargetCurrent { .. } => kind::TARGET_CURRENT,
             Message::TargetVelocity { .. } => kind::TARGET_VELOCITY,
             Message::TargetPosition { .. } => kind::TARGET_POSITION,
+            Message::TargetDuty { .. } => kind::TARGET_DUTY,
             Message::SetMode { .. } => kind::SET_MODE,
             Message::SetParam { .. } => kind::SET_PARAM,
             Message::ResetFault => kind::RESET_FAULT,
@@ -174,6 +179,7 @@ impl Message {
                 w.f32(velocity_ff);
                 w.f32(accel_ff);
             }
+            Message::TargetDuty { duty } => w.f32(duty),
             Message::SetMode { mode } => w.u8(mode),
             Message::SetParam { id, value } => {
                 w.u8(id);
@@ -227,6 +233,7 @@ impl Message {
             kind::TARGET_POSITION => {
                 Message::TargetPosition { position: r.i32(), velocity_ff: r.f32(), accel_ff: r.f32() }
             }
+            kind::TARGET_DUTY => Message::TargetDuty { duty: r.f32() },
             kind::SET_MODE => Message::SetMode { mode: r.u8() },
             kind::SET_PARAM => Message::SetParam { id: r.u8(), value: r.f32() },
             kind::RESET_FAULT => Message::ResetFault,
@@ -325,6 +332,7 @@ mod tests {
             Message::Ack { command: kind::SET_MODE },
             Message::Nack { command: kind::SET_PARAM, reason: 3, param: 0x04 },
             Message::FaultNotice,
+            Message::TargetDuty { duty: -0.25 },
         ]
     }
 
@@ -345,7 +353,7 @@ mod tests {
     #[test]
     fn encoded_lengths_match_spec() {
         let lengths: Vec<usize> = samples().iter().map(|m| encode(m).len()).collect();
-        assert_eq!(lengths, vec![8, 12, 16, 5, 9, 4, 4, 24, 5, 7, 4]);
+        assert_eq!(lengths, vec![8, 12, 16, 5, 9, 4, 4, 24, 5, 7, 4, 8]);
     }
 
     #[test]
@@ -361,7 +369,7 @@ mod tests {
     #[test]
     fn kinds_match_spec() {
         let kinds: Vec<u8> = samples().iter().map(|m| m.kind()).collect();
-        assert_eq!(kinds, vec![0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13, 0x20, 0x30, 0x31, 0x32]);
+        assert_eq!(kinds, vec![0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13, 0x20, 0x30, 0x31, 0x32, 0x04]);
     }
 
     #[test]

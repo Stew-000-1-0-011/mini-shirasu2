@@ -13,6 +13,8 @@ pub enum Target {
     Current(Q3_28),
     Velocity(Q3_28),
     Position(Q16_16),
+    /// 電流制御を通さずにPWMへ出すデューティ
+    Duty(Q3_28),
 }
 
 /// すべてper-unit
@@ -31,6 +33,7 @@ impl Setpoint {
         let target = match mode {
             Mode::Velocity => Target::Velocity(Q3_28::ZERO),
             Mode::Position => Target::Position(th),
+            Mode::Duty => Target::Duty(Q3_28::ZERO),
             _ => Target::Current(Q3_28::ZERO),
         };
         Setpoint { target, w_ff: Q3_28::ZERO, i_ff: Q3_28::ZERO }
@@ -56,7 +59,33 @@ pub fn setpoint_from_message(message: &Message, mode: Mode, scale: &Scale) -> Op
             w_ff: scale.velocity_pu(velocity_ff)?,
             i_ff: scale.accel_ff_pu(accel_ff)?,
         }),
+        (Message::TargetDuty { duty }, Mode::Duty) => {
+            let duty = Q3_28::checked_from_f32(duty)?;
+            if duty > Q3_28::ONE || duty < -Q3_28::ONE {
+                return None;
+            }
+            Some(Setpoint { target: Target::Duty(duty), w_ff: Q3_28::ZERO, i_ff: Q3_28::ZERO })
+        }
         _ => None,
+    }
+}
+
+/// 外側ループから電流ループへの指令
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Drive {
+    /// 電流目標[pu]。電流制御をする
+    Current(Q3_28),
+    /// デューティ。電流制御をせずにそのままPWMへ出す
+    Duty(Q3_28),
+}
+
+impl Drive {
+    /// モードに入った直後の指令。外側ループが最初の目標値を出すまでのあいだ使う
+    pub fn hold(mode: Mode) -> Drive {
+        match mode {
+            Mode::Duty => Drive::Duty(Q3_28::ZERO),
+            _ => Drive::Current(Q3_28::ZERO),
+        }
     }
 }
 
@@ -75,10 +104,19 @@ impl Cascade {
         self.velocity.reset();
     }
 
-    /// 電流目標[pu]を返す。saturatedは電流ループが前回報告した飽和
+    /// 電流ループへの指令を返す。デューティ目標はそのまま、それ以外は電流目標にする
+    pub fn drive(&mut self, p: &OuterParams, sp: &Setpoint, m: &Measurement, saturated: Saturated) -> Drive {
+        match sp.target {
+            Target::Duty(d) => Drive::Duty(d),
+            _ => Drive::Current(self.update(p, sp, m, saturated)),
+        }
+    }
+
+    /// 電流目標[pu]を返す。saturatedは電流ループが前回報告した飽和。デューティ目標では0
     pub fn update(&mut self, p: &OuterParams, sp: &Setpoint, m: &Measurement, saturated: Saturated) -> Q3_28 {
         match sp.target {
             Target::Current(i) => i,
+            Target::Duty(_) => Q3_28::ZERO,
             Target::Velocity(w) => self.velocity.update(&p.velocity, w, m, saturated) + sp.i_ff,
             Target::Position(th) => {
                 let w = self.position.update(&p.position, th, m) + sp.w_ff;
@@ -190,7 +228,58 @@ mod tests {
         assert_eq!(setpoint_from_message(&Message::SetMode { mode: 1 }, Mode::Current, &scale), None);
     }
 
+    #[test]
+    fn hold_starts_duty_mode_at_zero() {
+        let zero = Q3_28::ZERO;
+        assert_eq!(Setpoint::hold(Mode::Duty, q16(3.0)), Setpoint { target: Target::Duty(zero), w_ff: zero, i_ff: zero });
+    }
+
+    #[test]
+    fn duty_target_is_taken_as_is_in_duty_mode() {
+        let scale = outer().scale;
+        let sp = setpoint_from_message(&Message::TargetDuty { duty: -0.5 }, Mode::Duty, &scale).unwrap();
+        assert_eq!(sp, Setpoint { target: Target::Duty(q(-0.5)), w_ff: Q3_28::ZERO, i_ff: Q3_28::ZERO });
+        let sp = setpoint_from_message(&Message::TargetDuty { duty: 1.0 }, Mode::Duty, &scale).unwrap();
+        assert_eq!(sp.target, Target::Duty(Q3_28::ONE));
+    }
+
+    #[test]
+    fn duty_target_out_of_range_is_ignored() {
+        let scale = outer().scale;
+        for duty in [1.01, -1.01, 5.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(setpoint_from_message(&Message::TargetDuty { duty }, Mode::Duty, &scale), None, "{duty}");
+        }
+    }
+
+    #[test]
+    fn duty_target_and_duty_mode_do_not_mix_with_others() {
+        let scale = outer().scale;
+        let duty = Message::TargetDuty { duty: 0.1 };
+        for mode in [Mode::Disabled, Mode::Current, Mode::Velocity, Mode::Position, Mode::Fault] {
+            assert_eq!(setpoint_from_message(&duty, mode, &scale), None);
+        }
+        let current = Message::TargetCurrent { current: 1.0 };
+        assert_eq!(setpoint_from_message(&current, Mode::Duty, &scale), None);
+    }
+
+    #[test]
+    fn drive_hold_matches_mode() {
+        assert_eq!(Drive::hold(Mode::Duty), Drive::Duty(Q3_28::ZERO));
+        assert_eq!(Drive::hold(Mode::Current), Drive::Current(Q3_28::ZERO));
+        assert_eq!(Drive::hold(Mode::Position), Drive::Current(Q3_28::ZERO));
+    }
+
     // ---- カスケード ----
+
+    #[test]
+    fn drive_passes_duty_through_and_wraps_current_target() {
+        let p = outer();
+        let mut c = Cascade::new();
+        let sp = setpoint(Target::Duty(q(-0.4)), 0.0, 0.0);
+        assert_eq!(c.drive(&p, &sp, &meas(0.25, 0.0), Saturated::NotSaturated), Drive::Duty(q(-0.4)));
+        let sp = setpoint(Target::Current(q(0.3)), 0.0, 0.0);
+        assert_eq!(c.drive(&p, &sp, &meas(0.25, 0.0), Saturated::NotSaturated), Drive::Current(q(0.3)));
+    }
 
     #[test]
     fn current_mode_passes_target_through() {

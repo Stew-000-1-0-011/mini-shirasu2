@@ -40,7 +40,7 @@ mod app {
     use md_core::encoder::EncoderState;
     use md_core::fixed::{Q3_28, Q16_16};
     use minishirasu_firm::bench::{self, Capture, Sample, Script};
-    use minishirasu_firm::cascade::{self, Cascade, Setpoint};
+    use minishirasu_firm::cascade::{self, Cascade, Drive, Setpoint};
     use minishirasu_firm::config::{self, BuildError, InnerParams, OuterParams, Settings};
     use minishirasu_firm::protocol::{MAX_ENCODED, Message, Status, StreamParser};
     use minishirasu_firm::state::{self, Action, Mode, Reject, nack};
@@ -208,8 +208,8 @@ mod app {
             }
 
             let mut s = self.shared();
-            let (i_target, mut enabled, epoch, w, vdc, vdc_inv) =
-                s.link.lock(|l| (l.i_target, l.enabled, l.epoch, l.w, l.vdc, l.vdc_inv));
+            let (drive, mut enabled, epoch, w, vdc, vdc_inv) =
+                s.link.lock(|l| (l.drive, l.enabled, l.epoch, l.w, l.vdc, l.vdc_inv));
 
             let nfault = board::nfault_asserted();
             if nfault || !self.timing_ok {
@@ -237,8 +237,14 @@ mod app {
                 s.inner.lock(|p| match p {
                     Some(p) => {
                         let i = p.sense.current(adc.isense, offset, sign);
-                        let m = Measurement { vdc, vdc_inv, i, w, th: Q16_16::ZERO };
-                        let (duty, saturated) = state.update(&p.current, i_target, &m);
+                        let (duty, saturated) = match drive {
+                            Drive::Current(i_target) => {
+                                let m = Measurement { vdc, vdc_inv, i, w, th: Q16_16::ZERO };
+                                state.update(&p.current, i_target, &m)
+                            }
+                            // デューティ制御モード。電流制御を通さず、上限だけ掛けて出す
+                            Drive::Duty(duty) => (p.limit_duty(duty), Saturated::NotSaturated),
+                        };
                         (duty, saturated, i)
                     }
                     None => (Q3_28::ZERO, Saturated::NotSaturated, Q3_28::ZERO),
@@ -348,7 +354,8 @@ mod app {
                 meas.th = th;
                 // 母線電圧が低すぎて逆数が収まらないときは、前回の値を使い続ける
                 let vdc_ok = meas.update_vdc(p.sense.bus_voltage(input.vsense));
-                let i_target = if enabled { cascade.update(p, &setpoint, meas, saturated) } else { Q3_28::ZERO };
+                let drive =
+                    if enabled { cascade.drive(p, &setpoint, meas, saturated) } else { Drive::Current(Q3_28::ZERO) };
 
                 let mut flags = match saturated {
                     Saturated::Overflow => 0b001,
@@ -358,15 +365,15 @@ mod app {
                 if !vdc_ok {
                     flags |= 0b100;
                 }
-                Some((i_target, flags))
+                Some((drive, flags))
             });
-            let Some((i_target, flags)) = updated else {
+            let Some((drive, flags)) = updated else {
                 return;
             };
 
             let (w, th, vdc, vdc_inv) = (self.meas.w, self.meas.th, self.meas.vdc, self.meas.vdc_inv);
             s.link.lock(|l| {
-                l.i_target = i_target;
+                l.drive = drive;
                 l.w = w;
                 l.vdc = vdc;
                 l.vdc_inv = vdc_inv;
@@ -487,7 +494,7 @@ mod app {
                                 *m = new_mode;
                                 link.lock(|l| {
                                     l.epoch = l.epoch.wrapping_add(1);
-                                    l.i_target = Q3_28::ZERO;
+                                    l.drive = Drive::hold(new_mode);
                                     l.enabled = true;
                                 });
                                 board::output_enable();

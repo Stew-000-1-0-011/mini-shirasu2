@@ -2,13 +2,14 @@
 
 use md_core::controller::Saturated;
 use md_core::fixed::{Q3_28, Q16_16};
-use minishirasu_firm::cascade::Setpoint;
+use minishirasu_firm::cascade::{Drive, Setpoint};
 use minishirasu_firm::protocol::Message;
 
 /// 電流ループと外側ループの受け渡し。すべてper-unit
 pub struct Link {
     // 外側ループ・Command -> 電流ループ
-    pub i_target: Q3_28,
+    /// 電流目標、またはデューティ制御モードでのデューティ
+    pub drive: Drive,
     /// 電流制御をして出力を出すか
     pub enabled: bool,
     /// 制御モードに入るたびに増える。変わったら各ループが積分器をリセットする
@@ -30,7 +31,7 @@ pub struct Link {
 impl Link {
     pub fn new() -> Link {
         Link {
-            i_target: Q3_28::ZERO,
+            drive: Drive::Current(Q3_28::ZERO),
             enabled: false,
             epoch: 0,
             w: Q3_28::ZERO,
