@@ -59,7 +59,8 @@ pub fn init(p: &pac::Peripherals) {
     delay_ms(2);
 }
 
-/// HSE(12MHz) -> PLL x6 = 72MHz, APB1 = 36MHz, FLASH wait 2
+/// HSE(8MHz) -> PLL x9 = 72MHz, APB1 = 36MHz, FLASH wait 2
+/// (2025-12-02版の基板で水晶が12MHzから8MHzに変わった。12MHzの基板ではx6にする)
 fn clock_init(p: &pac::Peripherals) {
     p.RCC.cr.modify(|_, w| w.hseon().set_bit());
     while p.RCC.cr.read().hserdy().bit_is_clear() {}
@@ -69,7 +70,7 @@ fn clock_init(p: &pac::Peripherals) {
     // APB2(ADC元クロック)は分周無し(72MHz)なので、ADCPRE=/6で12MHzにする(ADCは最大14MHz)
     p.RCC
         .cfgr
-        .modify(|_, w| w.pllsrc().hse_div_prediv().pllxtpre().div1().pllmul().mul6().ppre1().div2().adcpre().div6());
+        .modify(|_, w| w.pllsrc().hse_div_prediv().pllxtpre().div1().pllmul().mul9().ppre1().div2().adcpre().div6());
     p.RCC.cr.modify(|_, w| w.pllon().set_bit());
     while p.RCC.cr.read().pllrdy().bit_is_clear() {}
 
