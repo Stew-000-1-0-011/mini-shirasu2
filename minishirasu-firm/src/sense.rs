@@ -7,8 +7,8 @@ use md_core::fixed::Q3_28;
 const VREF: f32 = 3.3;
 /// 12bit ADCの分解能
 const ADC_STEPS: f32 = 4096.0;
-/// シャント抵抗[Ω]
-const SHUNT_OHM: f32 = 0.002;
+/// シャント抵抗[Ω]。R12。2025-12-02版の基板で2mΩから1mΩになった
+const SHUNT_OHM: f32 = 0.001;
 /// 電流センスアンプ(INA2181A1)のゲイン
 const AMP_GAIN: f32 = 20.0;
 /// 母線電圧の分圧比の逆数。(10k + 1k) / 1k
@@ -70,13 +70,13 @@ mod tests {
 
     #[test]
     fn current_scales_offset_corrected_raw_value() {
-        // 1LSB = 3.3 / 4096 / (0.002 * 20) = 0.020142 A。2000LSBで40.28A = 2.0142pu
-        assert_near(param().current(2146, 146, 1), 2.0141602);
+        // 1LSB = 3.3 / 4096 / (0.001 * 20) = 0.040283 A。2000LSBで80.57A = 4.0283pu
+        assert_near(param().current(2146, 146, 1), 4.0283203);
     }
 
     #[test]
     fn current_sign_follows_duty_direction() {
-        assert_near(param().current(2146, 146, -1), -2.0141602);
+        assert_near(param().current(2146, 146, -1), -4.0283203);
     }
 
     #[test]
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn current_below_offset_is_negative() {
         // 回生でシャントに逆向きの電流が流れると、オフセットより下がる
-        assert_near(param().current(46, 146, 1), -0.10070801);
+        assert_near(param().current(46, 146, 1), -0.20141602);
     }
 
     #[test]

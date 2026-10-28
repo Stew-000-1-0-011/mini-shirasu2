@@ -211,7 +211,8 @@ mod app {
             let (drive, mut enabled, epoch, w, vdc, vdc_inv) =
                 s.link.lock(|l| (l.drive, l.enabled, l.epoch, l.w, l.vdc, l.vdc_inv));
 
-            let nfault = board::nfault_asserted();
+            // DRV8701はスリープ中や起きる途中の状態をNFAULTに出すことがあるので、出力を有効にしている間だけ見る
+            let nfault = enabled && board::nfault_asserted();
             if nfault || !self.timing_ok {
                 let entered = s.mode.lock(|m| {
                     let entered = *m != Mode::Fault;
@@ -254,16 +255,16 @@ mod app {
             };
 
             let compare = pwm::duty_to_compare(duty, config::PWM_ARR);
-            board::set_compare(compare.0, compare.1);
+            board::set_compare(compare);
             let written = board::phase();
             if cfg!(feature = "bench") {
                 let sample = Sample {
                     isense: ((adc.isense as i32 - self.offset as i32) * self.applied_sign) as i16,
-                    compare: compare.0 as i16 - compare.1 as i16,
+                    compare: compare.signed() as i16,
                 };
                 s.capture.lock(|c| c.push(sample));
             }
-            let sign = pwm::compare_sign(compare);
+            let sign = compare.sign();
             if after_peak || board::update_flag() {
                 // 書く前に山を越えてしまった。次の周期に出るのは1つ前に書いた値。
                 // 低い優先度のタスクが割り込みを長く禁止する(ログの出力など)と起きる
@@ -485,6 +486,9 @@ mod app {
                         Ok(Action::Enter(new_mode)) => {
                             let th = s.telemetry.lock(|t| t.th);
                             s.outer_cmd.lock(|c| c.setpoint = Setpoint::hold(new_mode, th));
+                            // ドライバを起こして待つ。待つ間に電流ループを止めないよう、ロックの外で呼ぶ。
+                            // 待つ間はEN=0なので、ドライバはブレーキ(両ローサイドON)になる
+                            board::driver_wake();
                             // 異常の検出(CurrentLoop)と競合しないよう、modeをロックしたまま出力を有効にする
                             let link = &mut s.link;
                             let entered = s.mode.lock(|m| {
@@ -500,7 +504,13 @@ mod app {
                                 board::output_enable();
                                 true
                             });
-                            if entered { Ok(()) } else { Err(Reject { reason: nack::FAULT, param: 0 }) }
+                            if entered {
+                                Ok(())
+                            } else {
+                                // 起こしている間に異常に入った。スリープに戻す
+                                board::output_disable();
+                                Err(Reject { reason: nack::FAULT, param: 0 })
+                            }
                         }
                         Ok(Action::SetParam { id, value }) => match self.settings.set(id, value) {
                             Err(_) => Err(Reject { reason: nack::VALUE, param: id }),

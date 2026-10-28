@@ -1,6 +1,13 @@
-//! レジスタ操作。ピン配置は docs/superpowers/specs/2026-10-03-minishirasu-firm-design.md の「基板」
+//! レジスタ操作。2025-12-02版の基板(ドライバはDRV8701、水晶は8MHz)のピン配置:
+//! - PA8: EN(TIM1 CH1、PWM)、PA9: PH(TIM1 CH2、向き)
+//! - PB11: NSLEEP(!EMS)、PB0: NFAULT、PB2: SNSOUT(使っていない)
+//! - PA3: ISENSEB(INA2181、ADC ch3)、PA4: ISENSEA(DRV8701のSO、使っていない)
+//! - PB1: VSENSE(ADC ch9)、PA7: TEMP(ADC ch7)
+//! - PA15/PB3: エンコーダ(TIM2の部分リマップ)
+//! - PB8/PB9: CAN
 
 use minishirasu_firm::config::PWM_ARR;
+use minishirasu_firm::pwm::Compare;
 use stm32f1::stm32f103 as pac;
 
 const SYSCLK_HZ: u32 = 72_000_000;
@@ -17,17 +24,21 @@ const RCR_BEFORE_START: bool = false;
 /// サンプル窓の中央を谷(ONパルスの中央)に合わせる
 const ADC_TRIGGER_CCR: u16 = 23;
 
-const CH_TEMP: u8 = 6; // PA6
-const CH_VSENSE: u8 = 8; // PB0
-const CH_ISENSEB: u8 = 9; // PB1
+const CH_ISENSEB: u8 = 3; // PA3
+const CH_TEMP: u8 = 7; // PA7
+const CH_VSENSE: u8 = 9; // PB1
+
+/// DRV8701がNSLEEPを上げてから動けるようになるまでの待ち[ms]。
+/// データシートのtWAKEより長くとる。実機で足りなければ延ばす
+const WAKE_MS: u32 = 2;
 
 // SAFETY(以下のアクセサ共通): init完了後、これらのレジスタは次の決まりで触る。
-// - GPIOA: BSRRへの書き込み(それ自体がアトミック)と、IDRの読み出しだけ
+// - GPIOB: BSRRへの書き込み(それ自体がアトミック)と、IDR・ODRの読み出しだけ
 // - TIM1: CCR1/CCR2/SRはCurrentLoopだけが書く
 // - ADC1: CurrentLoopだけが読む
 // - TIM2: CNTを読むだけ
-fn gpioa() -> &'static pac::gpioa::RegisterBlock {
-    unsafe { &*pac::GPIOA::ptr() }
+fn gpiob() -> &'static pac::gpiob::RegisterBlock {
+    unsafe { &*pac::GPIOB::ptr() }
 }
 
 fn tim1() -> &'static pac::tim1::RegisterBlock {
@@ -46,17 +57,13 @@ fn delay_ms(ms: u32) {
     cortex_m::asm::delay(SYSCLK_HZ / 1000 * ms);
 }
 
-/// 全ペリフェラルを設定し、ドライバを起こす。出力(EN)は無効のまま
+/// 全ペリフェラルを設定する。ドライバはスリープ(出力無効)のまま
 pub fn init(p: &pac::Peripherals) {
     clock_init(p);
     gpio_init(p);
     adc_init(p);
     tim2_init(p);
     tim1_init(p);
-
-    // NSLEEPを上げてドライバを起こす。起動に1msかかる
-    gpioa().bsrr.write(|w| w.bs2().set_bit());
-    delay_ms(2);
 }
 
 /// HSE(8MHz) -> PLL x9 = 72MHz, APB1 = 36MHz, FLASH wait 2
@@ -78,9 +85,9 @@ fn clock_init(p: &pac::Peripherals) {
     while !p.RCC.cfgr.read().sws().is_pll() {}
 }
 
-/// PA8/PA9: TIM1 AF push-pull, PA2(NSLEEP)/PA4(EN): 出力(Low), PA3(NFAULT): 入力プルアップ
-/// PA0/PA1(エンコーダ): 入力フローティング(リセット値のまま)
-/// PA6(TEMP), PB0(VSENSE), PB1(ISENSEB): アナログ入力
+/// PA8/PA9: TIM1 AF push-pull。PA3(ISENSEB), PA4(ISENSEA), PA7(TEMP), PB1(VSENSE): アナログ入力
+/// PB11(NSLEEP): 出力(Low), PB0(NFAULT): 入力プルアップ
+/// PA15/PB3(エンコーダ): 入力フローティング(リセット値のまま)
 /// PB8(CAN RX): 入力プルアップ, PB9(CAN TX): AF push-pull
 fn gpio_init(p: &pac::Peripherals) {
     p.RCC.apb2enr.modify(|_, w| {
@@ -91,17 +98,10 @@ fn gpio_init(p: &pac::Peripherals) {
     // idleのwfi中にデバッガからメモリを読めず、RTTのログが届かない
     p.RCC.ahbenr.modify(|_, w| w.dma1en().set_bit());
 
-    // 出力は先にLowにしておく、NFAULTはプルアップ
-    p.GPIOA.bsrr.write(|w| w.br2().set_bit().br4().set_bit().bs3().set_bit());
-
-    // CRL: PA2 = 0b0010(出力PP 2MHz), PA3 = 0b1000(入力プル), PA4 = 0b0010, PA6 = 0b0000(アナログ)
-    p.GPIOA.crl.modify(|r, w| unsafe {
-        let mut v = r.bits();
-        v &= !((0xF << 8) | (0xF << 12) | (0xF << 16) | (0xF << 24));
-        v |= (0b0010 << 8) | (0b1000 << 12) | (0b0010 << 16);
-        w.bits(v)
-    });
-    // CRH: PA8, PA9 = 0b1011(AF出力PP 50MHz)
+    // GPIOA CRL: PA3, PA4, PA7 = 0b0000(アナログ入力)。
+    // PA4はDRV8701のSOが1k越しにつながっているので、出力にしない
+    p.GPIOA.crl.modify(|r, w| unsafe { w.bits(r.bits() & !((0xF << 12) | (0xF << 16) | (0xF << 28))) });
+    // GPIOA CRH: PA8, PA9 = 0b1011(AF出力PP 50MHz)
     p.GPIOA.crh.modify(|r, w| unsafe {
         let mut v = r.bits();
         v &= !((0xF << 0) | (0xF << 4));
@@ -109,21 +109,30 @@ fn gpio_init(p: &pac::Peripherals) {
         w.bits(v)
     });
 
-    // GPIOB CRL: PB0, PB1 = CNF00 MODE00(アナログ入力)
-    p.GPIOB.crl.modify(|r, w| unsafe { w.bits(r.bits() & !((0xF << 0) | (0xF << 4))) });
-    // GPIOB CRH: PB8 = 0b1000(入力プル), PB9 = 0b1011(AF出力PP 50MHz)。PB8はプルアップ
-    p.GPIOB.bsrr.write(|w| w.bs8().set_bit());
-    p.GPIOB.crh.modify(|r, w| unsafe {
+    // NSLEEPは先にLow(スリープ)、NFAULTとCAN RXはプルアップ
+    p.GPIOB.bsrr.write(|w| w.br11().set_bit().bs0().set_bit().bs8().set_bit());
+    // GPIOB CRL: PB0 = 0b1000(入力プル), PB1 = 0b0000(アナログ入力)
+    p.GPIOB.crl.modify(|r, w| unsafe {
         let mut v = r.bits();
         v &= !((0xF << 0) | (0xF << 4));
-        v |= (0b1000 << 0) | (0b1011 << 4);
+        v |= 0b1000 << 0;
+        w.bits(v)
+    });
+    // GPIOB CRH: PB8 = 0b1000(入力プル), PB9 = 0b1011(AF出力PP 50MHz), PB11 = 0b0010(出力PP 2MHz)
+    p.GPIOB.crh.modify(|r, w| unsafe {
+        let mut v = r.bits();
+        v &= !((0xF << 0) | (0xF << 4) | (0xF << 12));
+        v |= (0b1000 << 0) | (0b1011 << 4) | (0b0010 << 12);
         w.bits(v)
     });
 
-    // CANをPB8/PB9へ(CAN_REMAP = 10)。
-    // SWJ_CFGは書き込み専用で読み値が不定なので、modifyでも毎回000(SWD/JTAG有効)を書く。
+    // CANをPB8/PB9へ(CAN_REMAP = 10)。TIM2のCH1/CH2をPA15/PB3へ(TIM2_REMAP = 01)。
+    // PA15とPB3はJTAGのピンなので、SWJ_CFG = 010でJTAGを切ってSWDだけ残す。
+    // SWJ_CFGは書き込み専用で読み値が不定なので、modifyでも毎回書く。
     // 書かないと読んだゴミが書き戻され、デバッガがつながらなくなることがある
-    p.AFIO.mapr.modify(|_, w| unsafe { w.can_remap().bits(0b10).swj_cfg().bits(0b000) });
+    p.AFIO
+        .mapr
+        .modify(|_, w| unsafe { w.can_remap().bits(0b10).tim2_remap().bits(0b01).swj_cfg().bits(0b010) });
 }
 
 /// ADC1: キャリブレーション後、TIM1_TRGOトリガのインジェクテッド変換(ISENSEB, VSENSE, TEMP)を設定
@@ -147,7 +156,7 @@ fn adc_init(p: &pac::Peripherals) {
     // 電流ループは変換が終わってから山までにコンペア値を書く必要があり、計算に約14usかかる。
     // 変換が長いと間に合わない(VSENSE 28.5cyc、TEMP 55.5cycの合計10.75usでは足りなかった)。
     // VSENSEとTEMPはピンにコンデンサ(100n, 1u)があるので、短いサンプル時間でも読める
-    adc.smpr2.modify(|_, w| w.smp6().bits(0b001).smp8().bits(0b001).smp9().bits(0b001));
+    adc.smpr2.modify(|_, w| w.smp3().bits(0b001).smp7().bits(0b001).smp9().bits(0b001));
 
     // インジェクテッド3変換。JL=2のときJSQ2,JSQ3,JSQ4の順に変換され、JDR1..3に入る
     adc.jsqr.write(|w| unsafe {
@@ -260,36 +269,45 @@ pub fn phase() -> u16 {
 }
 
 /// コンペア値を書く。プリロードなので、次の更新イベント(山)で反映される
-pub fn set_compare(a: u16, b: u16) {
-    // PA9(PWMA)=CH2, PA8(PWMB)=CH1
-    tim1().ccr2().write(|w| w.ccr().bits(a));
-    tim1().ccr1().write(|w| w.ccr().bits(b));
+pub fn set_compare(c: Compare) {
+    // PA8(EN)=CH1, PA9(PH)=CH2
+    tim1().ccr1().write(|w| w.ccr().bits(c.en));
+    tim1().ccr2().write(|w| w.ccr().bits(c.ph));
 }
 
 pub fn encoder_count() -> u16 {
     tim2().cnt.read().bits() as u16
 }
 
-/// EN(!EMS)を上げる。High=有効
+/// ドライバを起こし、動けるようになるまで待つ(約2msブロックする)。もう起きていれば待たない。
+/// 割り込みを止めたまま待たないよう、output_enableとは分けて、ロックの外で呼ぶ
+pub fn driver_wake() {
+    if gpiob().odr.read().odr11().bit_is_set() {
+        return;
+    }
+    gpiob().bsrr.write(|w| w.bs11().set_bit());
+    delay_ms(WAKE_MS);
+}
+
+/// 出力を有効にする。DRV8701にはENがないので、NSLEEPをHighにする。
+/// 先にdriver_wakeで起こしておくこと。ここでは待たない
 pub fn output_enable() {
-    gpioa().bsrr.write(|w| w.bs4().set_bit());
+    gpiob().bsrr.write(|w| w.bs11().set_bit());
 }
 
-/// ENを下げる。出力はハイインピーダンスになり、モーターはフリーになる
+/// NSLEEPを下げてスリープにする。ゲートがすべてOFFになり、モーターはフリーになる
 pub fn output_disable() {
-    gpioa().bsrr.write(|w| w.br4().set_bit());
+    gpiob().bsrr.write(|w| w.br11().set_bit());
 }
 
-/// NFAULT(PA3)はLowで異常
+/// NFAULT(PB0)はLowで異常
 pub fn nfault_asserted() -> bool {
-    gpioa().idr.read().idr3().bit_is_clear()
+    gpiob().idr.read().idr0().bit_is_clear()
 }
 
-/// ドライバの異常ラッチを解く。MPQ6528の異常はnSLEEPでしか解除できない。
-/// 1ms Lowにしてから起こし、起動時間(1ms)より長く待つ。約3msブロックする
+/// ドライバの異常を解く。DRV8701の異常はスリープで解除されるので、スリープのまま1ms待つ。
+/// 次に有効にするときにdriver_wakeで起こす
 pub fn driver_restart() {
-    gpioa().bsrr.write(|w| w.br2().set_bit());
+    output_disable();
     delay_ms(1);
-    gpioa().bsrr.write(|w| w.bs2().set_bit());
-    delay_ms(2);
 }
