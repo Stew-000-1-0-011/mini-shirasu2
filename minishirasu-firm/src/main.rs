@@ -65,6 +65,13 @@ mod app {
 
     #[init]
     fn init() -> (Shared, TaskInits) {
+        // 書き込んだファームを見分けるため、何よりも先に出す。-dirtyは未コミットの変更を含むビルド
+        defmt::info!(
+            "firmware: board-2025-12-02 build, branch={=str} commit={=str}{=str}",
+            env!("FIRM_GIT_BRANCH"),
+            env!("FIRM_GIT_COMMIT"),
+            env!("FIRM_GIT_DIRTY")
+        );
         let p = pac::Peripherals::take().unwrap();
         board::init(&p);
         let phase_ok = board::check_update_phase();
